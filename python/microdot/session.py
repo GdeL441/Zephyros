@@ -23,9 +23,13 @@ class SessionDict(dict):
 
 
 class Session:
-    """
+    """Session handling
+
     :param app: The application instance.
-    :param key: The secret key, as a string or bytes object.
+    :param secret_key: The secret key, as a string or bytes object.
+    :param cookie_options: A dictionary with cookie options to pass as
+                           arguments to :meth:`Response.set_cookie()
+                           <microdot.Response.set_cookie>`.
     """
     secret_key = None
 

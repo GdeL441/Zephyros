@@ -1,3 +1,4 @@
+import asyncio
 from microdot.microdot import Request, Response, AsyncBytesIO
 
 try:
@@ -32,6 +33,11 @@ class TestResponse:
         #: The body of the JSON response, decoded to a dictionary or list. Set
         #: ``Note`` if the response does not have a JSON payload.
         self.json = None
+        #: The body of the SSE response, decoded to a list of events, each
+        #: given as a dictionary with a ``data`` key and optionally also
+        #: ``event`` and ``id`` keys. Set to ``None`` if the response does not
+        #: have an SSE payload.
+        self.events = None
 
     def _initialize_response(self, res):
         self.status_code = res.status_code
@@ -41,10 +47,13 @@ class TestResponse:
     async def _initialize_body(self, res):
         self.body = b''
         iter = res.body_iter()
-        async for body in iter:  # pragma: no branch
-            if isinstance(body, str):
-                body = body.encode()
-            self.body += body
+        try:
+            async for body in iter:  # pragma: no branch
+                if isinstance(body, str):
+                    body = body.encode()
+                self.body += body
+        except asyncio.CancelledError:  # pragma: no cover
+            pass
         if hasattr(iter, 'aclose'):  # pragma: no branch
             await iter.aclose()
 
@@ -60,6 +69,36 @@ class TestResponse:
             if content_type.split(';')[0] == 'application/json':
                 self.json = json.loads(self.text)
 
+    def _process_sse_body(self):
+        if 'Content-Type' in self.headers:  # pragma: no branch
+            content_type = self.headers['Content-Type']
+            if content_type.split(';')[0] == 'text/event-stream':
+                self.events = []
+                for sse_event in self.body.split(b'\n\n'):
+                    data = None
+                    event = None
+                    event_id = None
+                    retry = None
+                    for line in sse_event.split(b'\n'):
+                        if line.startswith(b'data:'):
+                            data = line[5:].strip()
+                        elif line.startswith(b'event:'):
+                            event = line[6:].strip().decode()
+                        elif line.startswith(b'id:'):
+                            event_id = line[3:].strip().decode()
+                        elif line.startswith(b'retry:'):
+                            retry = int(line[7:].strip()) / 1000
+                    if data:
+                        data_json = None
+                        try:
+                            data_json = json.loads(data)
+                        except ValueError:
+                            pass
+                        self.events.append({
+                            'data': data, 'data_json': data_json,
+                            'event': event, 'event_id': event_id,
+                            'retry': retry})
+
     @classmethod
     async def create(cls, res):
         test_res = cls()
@@ -68,6 +107,7 @@ class TestResponse:
             await test_res._initialize_body(res)
             test_res._process_text_body()
             test_res._process_json_body()
+            test_res._process_sse_body()
         return test_res
 
 
@@ -77,6 +117,8 @@ class TestClient:
     :param app: The Microdot application instance.
     :param cookies: A dictionary of cookies to use when sending requests to the
                     application.
+    :param scheme: The scheme to use for requests, either 'http' or 'https'.
+    :param host: The host to use for requests.
 
     The following example shows how to create a test client for an application
     and send a test request::
@@ -97,9 +139,11 @@ class TestClient:
     """
     __test__ = False  # remove this class from pytest's test collection
 
-    def __init__(self, app, cookies=None):
+    def __init__(self, app, cookies=None, scheme=None, host=None):
         self.app = app
         self.cookies = cookies or {}
+        self.scheme = scheme
+        self.host = host or 'example.com:1234'
 
     def _process_body(self, body, headers):
         if body is None:
@@ -112,8 +156,6 @@ class TestClient:
             body = body.encode()
         if body and 'Content-Length' not in headers:
             headers['Content-Length'] = str(len(body))
-        if 'Host' not in headers:  # pragma: no branch
-            headers['Host'] = 'example.com:1234'
         return body, headers
 
     def _process_cookies(self, path, headers):
@@ -136,6 +178,8 @@ class TestClient:
     def _render_request(self, method, path, headers, body):
         request_bytes = '{method} {path} HTTP/1.0\n'.format(
             method=method, path=path)
+        if 'Host' not in headers:  # pragma: no branch
+            request_bytes += 'Host: {host}\n'.format(host=self.host)
         for header, value in headers.items():
             request_bytes += '{header}: {value}\n'.format(
                 header=header, value=value)
@@ -171,7 +215,9 @@ class TestClient:
                     _, path = option.split('=', 1)
             if delete:
                 if cookie_name in self.cookies:  # pragma: no branch
-                    cookie_path = self.cookies[cookie_name][1] \n                        if isinstance(self.cookies[cookie_name], tuple) \n                        else '/'
+                    cookie_path = self.cookies[cookie_name][1] \
+                        if isinstance(self.cookies[cookie_name], tuple) \
+                        else '/'
                     if path == cookie_path:
                         del self.cookies[cookie_name]
             else:
@@ -194,7 +240,7 @@ class TestClient:
             writer = AsyncBytesIO(b'')
 
         req = await Request.create(self.app, reader, writer,
-                                   ('127.0.0.1', 1234))
+                                   ('127.0.0.1', 1234), scheme=self.scheme)
         res = await self.app.dispatch_request(req)
         if res == Response.already_handled:
             return TestResponse()
@@ -284,13 +330,15 @@ class TestClient:
 
             async def _next(self, data=None):
                 try:
-                    data = (await gen.asend(data)) if hasattr(gen, 'asend') \n                        else gen.send(data)
+                    data = (await gen.asend(data)) if hasattr(gen, 'asend') \
+                        else gen.send(data)
                 except (StopIteration, StopAsyncIteration):
                     if not self.closed:
                         self.closed = True
                         raise OSError(32, 'Websocket connection closed')
                     return  # pragma: no cover
-                opcode = WebSocket.TEXT if isinstance(data, str) \n                    else WebSocket.BINARY
+                opcode = WebSocket.TEXT if isinstance(data, str) \
+                    else WebSocket.BINARY
                 return WebSocket._encode_websocket_frame(opcode, data)
 
             async def read(self, n):

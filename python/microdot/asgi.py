@@ -2,7 +2,8 @@ import asyncio
 import os
 import signal
 from microdot import *  # noqa: F401, F403
-from microdot.microdot import Microdot as BaseMicrodot, Request, Response, \n    NoCaseDict, abort
+from microdot.microdot import Microdot as BaseMicrodot, Request, Response, \
+    NoCaseDict, abort
 from microdot.websocket import WebSocket as BaseWebSocket, websocket_wrapper
 
 
@@ -47,15 +48,47 @@ class Microdot(BaseMicrodot):
     """A subclass of the core :class:`Microdot <microdot.Microdot>` class that
     implements the ASGI protocol.
 
+    :param startup: An optional function to handle the `lifespan.startup` ASGI
+                    signal.
+    :param shutdown: An optional function to handle the `lifespan.shutdown`
+                     ASGI signal.
+
     This class must be used as the application instance when running under an
     ASGI web server.
     """
-    def __init__(self):
+    def __init__(self, lifespan_startup=None, lifespan_shutdown=None):
         super().__init__()
+        self.lifespan_startup = lifespan_startup
+        self.lifespan_shutdown = lifespan_shutdown
         self.embedded_server = False
+
+    async def handle_lifespan(self, scope, receive, send):
+        while True:
+            message = await receive()
+            if message['type'] == 'lifespan.startup':
+                try:
+                    if self.lifespan_startup:
+                        await self.lifespan_startup(scope)
+                except Exception as e:
+                    await send({'type': 'lifespan.startup.failed',
+                                'message': repr(e)})
+                else:
+                    await send({'type': 'lifespan.startup.complete'})
+            elif message['type'] == 'lifespan.shutdown':  # pragma: no branch
+                try:
+                    if self.lifespan_shutdown:
+                        await self.lifespan_shutdown(scope)
+                except Exception as e:
+                    await send({'type': 'lifespan.shutdown.failed',
+                                'message': repr(e)})
+                else:
+                    await send({'type': 'lifespan.shutdown.complete'})
+                break
 
     async def asgi_app(self, scope, receive, send):
         """An ASGI application."""
+        if scope['type'] == 'lifespan':
+            return await self.handle_lifespan(scope, receive, send)
         if scope['type'] not in ['http', 'websocket']:  # pragma: no cover
             return
         path = scope['path']
@@ -90,7 +123,8 @@ class Microdot(BaseMicrodot):
             headers,
             body=body,
             stream=stream,
-            sock=(receive, send))
+            sock=(receive, send),
+            scheme=scope.get('scheme'))
         req.asgi_scope = scope
 
         res = await self.dispatch_request(req)
@@ -118,26 +152,27 @@ class Microdot(BaseMicrodot):
 
             while True:
                 event = await receive()
-                if event is None or \n                        event['type'] == 'http.disconnect':  # pragma: no cover
+                if event is None or \
+                        event['type'] == 'http.disconnect':  # pragma: no cover
                     cancelled = True
                     break
 
         monitor_task = asyncio.ensure_future(cancel_monitor())
 
         body_iter = res.body_iter().__aiter__()
-        res_body = b''
         try:
-            res_body = await body_iter.__anext__()
             while not cancelled:  # pragma: no branch
-                next_body = await body_iter.__anext__()
+                res_body = await body_iter.__anext__()
+                if isinstance(res_body, str):
+                    res_body = res_body.encode()
                 await send({'type': 'http.response.body',
                             'body': res_body,
                             'more_body': True})
-                res_body = next_body
         except StopAsyncIteration:
-            await send({'type': 'http.response.body',
-                        'body': res_body,
-                        'more_body': False})
+            pass
+        await send({'type': 'http.response.body',
+                    'body': b'',
+                    'more_body': False})
         if hasattr(body_iter, 'aclose'):  # pragma: no branch
             await body_iter.aclose()
         cancelled = True
@@ -211,7 +246,8 @@ async def websocket_upgrade(request):  # pragma: no cover
                 message = await ws.receive()
                 await ws.send(message)
     """
-    ws = WebSocket(request) if not request.app.embedded_server else \n        BaseWebSocket(request)
+    ws = WebSocket(request) if not request.app.embedded_server else \
+        BaseWebSocket(request)
     await ws.handshake()
 
     @request.after_request

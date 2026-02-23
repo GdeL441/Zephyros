@@ -2,8 +2,10 @@ import asyncio
 import os
 import signal
 from microdot import *  # noqa: F401, F403
-from microdot.microdot import Microdot as BaseMicrodot, Request, NoCaseDict, \n    MUTED_SOCKET_ERRORS
-from microdot.websocket import WebSocket, websocket_upgrade, \n    with_websocket  # noqa: F401
+from microdot.microdot import Microdot as BaseMicrodot, Request, NoCaseDict, \
+    MUTED_SOCKET_ERRORS
+from microdot.websocket import WebSocket, websocket_upgrade, \
+    with_websocket  # noqa: F401
 
 
 class Microdot(BaseMicrodot):
@@ -94,7 +96,8 @@ class Microdot(BaseMicrodot):
             headers,
             body=body,
             stream=stream,
-            sock=sock)
+            sock=sock,
+            scheme=environ.get('wsgi.url_scheme'))
         req.environ = environ
 
         res = self.loop.run_until_complete(self.dispatch_request(req))
