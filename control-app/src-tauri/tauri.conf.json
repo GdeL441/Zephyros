@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "control-app",
-  "version": "0.1.0",
-  "identifier": "com.a2.zephyros",
+  "productName": "Zephyros Control App",
+  "version": "0.0.1",
+  "identifier": "com.zephyros.app",
   "build": {
     "frontendDist": "../src"
   },
@@ -10,9 +10,9 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "control-app",
-        "width": 800,
-        "height": 600
+        "title": "Zephyros Control App",
+        "width": 1300,
+        "height": 950
       }
     ],
     "security": {
@@ -22,6 +22,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

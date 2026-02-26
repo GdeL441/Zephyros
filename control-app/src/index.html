@@ -1,39 +1,414 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
-    <script type="module" src="/main.js" defer></script>
-  </head>
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="auto">
+<!-- [Head] start -->
 
-  <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+<head>
+  <title>Home | Zephyros</title>
+  <!-- [Meta] -->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
 
-      <div class="row">
-        <a href="https://tauri.app" target="_blank">
-          <img src="/assets/tauri.svg" class="logo tauri" alt="Tauri logo" />
-        </a>
-        <a
-          href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"
-          target="_blank"
-        >
-          <img
-            src="/assets/javascript.svg"
-            class="logo vanilla"
-            alt="JavaScript logo"
-          />
+  <!-- [Favicon] icon -->
+  <link rel="icon" href="assets/images/favicon.svg" type="image/x-icon"> <!-- [Google Font] Family -->
+  <!-- <link rel="stylesheet" -->
+  <!--   href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;500;600;700&display=swap" -->
+  <!--   id="main-font-link"> -->
+  <!-- [Tabler Icons] https://tablericons.com -->
+  <link rel="stylesheet" href="assets/fonts/tabler-icons.min.css">
+
+
+
+
+  <!-- [Template CSS Files] -->
+  <link rel="stylesheet" href="assets/css/style.css" id="main-style-link">
+
+  <link rel="stylesheet" href="./styles.css">
+
+</head>
+<!-- [Head] end -->
+<!-- [Body] Start -->
+
+<body data-pc-preset="preset-1" data-pc-direction="ltr" data-pc-theme="light">
+  <!-- [ Pre-loader ] start -->
+  <div class="loader-bg">
+    <div class="loader-track">
+      <div class="loader-fill"></div>
+    </div>
+  </div>
+  <!-- [ Pre-loader ] End -->
+  <!-- [ Sidebar Menu ] start -->
+  <nav class="pc-sidebar">
+    <div class="navbar-wrapper">
+      <div class="m-header">
+        <a class="b-brand text-primary">
+          <!-- ========   Change your logo from here   ============ -->
+          <img src="assets/images/logo-dark.svg" class="img-fluid logo-lg" alt="logo">
         </a>
       </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+      <div class="navbar-content">
+        <ul class="pc-navbar">
+          <li class="pc-item" id="dashboard-link">
+            <a href="#dashboard" class="pc-link">
+              <span class="pc-micon"><i class="ti ti-dashboard"></i></span>
+              <span class="pc-mtext">Dashboard</span>
+            </a>
+          </li>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-    </main>
-  </body>
+          <li class="pc-item pc-caption">
+            <label>Configuration</label>
+            <i class="ti ti-dashboard"></i>
+          </li>
+          <li class="pc-item" id="settings-link">
+            <a href="#settings" class="pc-link">
+              <span class="pc-micon"><i class="ti ti-settings"></i></span>
+              <span class="pc-mtext">Settings</span>
+            </a>
+          </li>
+          <li class="pc-item">
+            <a href="#wifi" class="pc-link">
+              <span class="pc-micon"><i class="ti ti-wifi"></i></span>
+              <span class="pc-mtext">WiFi Setup</span>
+            </a>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+  <!-- [ Sidebar Menu ] end --> <!-- [ Header Topbar ] start -->
+  <header class="pc-header">
+    <div class="header-wrapper" style="height: 70px; display: flex; align-items: center;">
+      <!-- [Mobile Media Block] start -->
+      <div class="me-auto pc-mob-drp">
+        <ul class="list-unstyled">
+          <!-- ======= Menu collapse Icon ===== -->
+          <li class="pc-h-item pc-sidebar-collapse" style="display: none;">
+            <a href="#" class="pc-head-link ms-0" id="sidebar-hide">
+              <i class="ti ti-menu-2"></i>
+            </a>
+          </li>
+
+
+        </ul>
+      </div>
+      <!-- [Mobile Media Block end] -->
+      <div class="ms-auto pe-4">
+        <div class="d-flex align-items-center gap-2">
+          <button type="button" class="btn btn-success" id="connect-btn">
+            <i class="ti ti-plug me-1"></i><span id="connect-btn-text">Open WebSocket Connection</span>
+          </button>
+          <div class="d-flex align-items-center gap-2">
+            <label for="ip-input" class="mb-0">Device IP:</label>
+            <input type="text" class="form-control" id="ip-input" value="192.168.4.1" style="width: 150px;">
+          </div>
+          <span id="status">Disconnected</span>
+          <!-- bg-danger or bg-success-->
+          <span class="status-dot bg-danger" id="status-dot"
+            style="width: 10px; height: 10px; border-radius: 50%; display: inline-block;"></span>
+        </div>
+      </div>
+    </div>
+  </header>
+  <!-- [ Header ] end -->
+
+
+
+  <!-- [ Main Content ] start -->
+
+  <div class="pc-container">
+    <div class="pc-content" id="dashboard">
+      <!-- [ Main Content ] start -->
+      <div class="row">
+        <!-- Left column -->
+        <div class="col-md-12 col-xl-8">
+          <div class="card">
+            <div class="card-body">
+              <div class="d-flex gap-3 align-items-center">
+                <div class="d-flex gap-3" style="width: 100%;">
+                  <button type="button" class="btn btn-primary" id="start-fan">Start Fan</button>
+                  <button type="button" class="btn btn-danger" id="stop-fan">Stop Fan</button>
+                  <button type="button" class="btn btn-primary" id="reset-smoke">Enable Smoke Machine</button>
+                  <button type="button" class="btn btn-danger" id="disable-smoke">Disable Smoke Machine</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <div class="d-flex gap-4 h-100">
+                <div class="flex-grow-1 min-w-0">
+                  <h6 class="mb-3 f-w-400 text-muted">3D Windtunnel View</h6>
+                  <h6 class="mb-3 f-w-400 text-muted">To be implemented in future updates</h6>
+                  <div class="grid-layout" style="aspect-ratio: 1.4/1;"></div>
+                </div>
+                <div class="fan-speed-panel">
+                  <i class="ti ti-propeller fan-speed-icon"></i>
+                  <span class="fan-speed-label">Fan Speed</span>
+                  <div class="fan-speed-badge">
+                    <span id="fan-speed-value">0</span><small>%</small>
+                  </div>
+                  <div class="fan-speed-track">
+
+                    <input type="range" id="fan-speed-slider" class="fan-speed-slider"
+                      min="0" max="100" value="0" orient="vertical">
+
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Right column -->
+        <div class="col-md-12 col-xl-4">
+          <div class="card">
+            <div class="card-body">
+              <h6 class="mb-3 fw-500 text-muted">Generated Power</h6>
+              <div class="d-flex flex-column gap-3">
+                <h4 class="mb-0" id="voltage">Voltage:</h4>
+                <h4 class="mb-0" id="current">Current:</h4>
+                <h4 class="mb-0" id="power">Power:</h4>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <h6 class="mb-3 fw-500 text-muted">Windtunnel Status</h6>
+              <div class="d-flex flex-column gap-3">
+                <h4 class="mb-0" id="air-temp">Air Temp: <span id="temp-display"></span></h4>
+                <h4 class="mb-0" id="speed-kmh">Fan Speed (km/h): <span id="fan-status"></span></h4>
+                <h4 class="mb-0" id="speed-kmh">Uptime: <span id="uptime"></span></h4>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="pc-content" id="settings">
+      <h1>Settings</h1>
+
+      <!--[ Main Content ] start-->
+      <div class="row g-4">
+        <div class="col-sm-6 d-flex">
+          <div class="card w-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <h4 class="mb-0">Sensor Settings</h4>
+              <button id="apply-thresholds-btn" class="btn btn-primary" style="width: 150px;">Apply</button>
+            </div>
+            <div class="card-body">
+              <div class="d-flex flex-column gap-2">
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="left-sensor-threshold" class="mb-0">Left Sensor:</label>
+                  <div class="d-flex align-items-center">
+                    <small class="text-muted me-2">(0 - 65535)</small>
+                    <input type="number" class="form-control ms-auto" id="left-sensor-threshold" style="width: 100px;">
+                  </div>
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="right-sensor-threshold" class="mb-0">Right Sensor:</label>
+                  <div class="d-flex align-items-center">
+                    <small class="text-muted me-2">(0 - 65535)</small>
+                    <input type="number" class="form-control ms-auto" id="right-sensor-threshold" style="width: 100px;">
+                  </div>
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="back-sensor-threshold" class="mb-0">Back Sensor:</label>
+                  <div class="d-flex align-items-center">
+                    <small class="text-muted me-2">(0 - 65535)</small>
+                    <input type="number" class="form-control ms-auto" id="back-sensor-threshold" style="width: 100px;">
+                  </div>
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3 mt-2">
+                  <label for="calibration-threshold" class="mb-0">Left and Right Calibration Threshold:</label>
+                  <div class="d-flex align-items-center">
+                    <small class="text-muted me-2">(0.01 - 1.0)</small>
+                    <input type="number" class="form-control ms-auto" id="calibration-threshold" min="0.01" max="1.0" step="0.01" style="width: 100px;">
+                  </div>
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3 mt-2">
+                  <label for="back-calibration-threshold" class="mb-0">Rear Calibration Threshold:</label>
+                  <div class="d-flex align-items-center">
+                    <small class="text-muted me-2">(0.01 - 1.0)</small>
+                    <input type="number" class="form-control ms-auto" id="back-calibration-threshold" min="0.01" max="1.0" step="0.01" style="width: 100px;">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 d-flex">
+          <div class="card w-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <h4 class="mb-0">Sensor Monitor</h4>
+              <button id="monitor-btn" class="btn btn-success" style="width: 150px;" data-monitoring="false">Start Monitoring</button>
+            </div>
+            <div class="card-body">
+              <div class="d-flex flex-column gap-2">
+                <div class="d-flex align-items-center gap-3">
+                  <label class="mb-0" style="width: 120px;">Left Value:</label>
+                  <span id="left-sensor-value" class="form-control-plaintext fw-bold" style="width: 100px;">--</span>
+                </div>
+                <div class="d-flex align-items-center gap-3">
+                  <label class="mb-0" style="width: 120px;">Right Value:</label>
+                  <span id="right-sensor-value" class="form-control-plaintext fw-bold" style="width: 100px;">--</span>
+                </div>
+                <div class="d-flex align-items-center gap-3">
+                  <label class="mb-0" style="width: 120px;">Back Value:</label>
+                  <span id="back-sensor-value" class="form-control-plaintext fw-bold" style="width: 100px;">--</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!--[ sensors ] end-->
+      <!-- PID and Settings Row -->
+      <div class="row g-4">
+        <div class="col-sm-6 d-flex">
+          <div class="card w-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <h4 class="mb-0">PID Parameters</h4>
+              <button id="apply-pid-btn" class="btn btn-primary" style="width: 150px;">Apply</button>
+            </div>
+            <div class="card-body">
+              <div class="d-flex flex-column gap-2">
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="kp-value" class="mb-0">Proportional Constant (Kp):</label>
+                  <input type="number" class="form-control ms-auto" id="kp-value" style="width: 100px;">
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="ki-value" class="mb-0">Integral Constant (Ki):</label>
+                  <input type="number" class="form-control ms-auto" id="ki-value" style="width: 100px;">
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="kd-value" class="mb-0">Derivative Constant (Kd):</label>
+                  <input type="number" class="form-control ms-auto" id="kd-value" style="width: 100px;">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-6 d-flex">
+          <div class="card w-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <h4 class="mb-0">Settings</h4>
+              <button id="apply-speed-btn" class="btn btn-primary" style="width: 150px;">Apply</button>
+            </div>
+            <div class="card-body">
+              <div class="d-flex flex-column gap-2">
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="speed-value" class="mb-0">Straight Line Speed:</label>
+                  <div class="d-flex align-items-center">
+                    <small class="text-muted me-2">(0 - 100)</small>
+                    <input type="number" class="form-control ms-auto" id="speed-value" style="width: 100px;">
+                  </div>
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="turn-speed-value" class="mb-0">Turning Speed:</label>
+                  <div class="d-flex align-items-center">
+                    <small class="text-muted me-2">(0 - 100)</small>
+                    <input type="number" class="form-control ms-auto" id="turn-speed-value" style="width: 100px;">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!--[ pid ] end-->
+      <!--[ monitor ] start-->
+      <div class="col-sm-12">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <div>
+              <h4>Monitor</h4>
+              <p class="mb-0">WebSocket Communication Log</p>
+            </div>
+            <button id="clear-log-btn" class="btn btn-secondary">Clear Log</button>
+          </div>
+          <div class="card-body">
+            <div id="websocket-log"
+              style="height: 300px; overflow-y: auto; font-family: monospace; background: #f8f9fa; padding: 1rem;">
+              <!-- Log entries will be inserted here -->
+            </div>
+          </div>
+        </div>
+      </div>
+      <!--[ settings ] end-->
+    </div>
+    <div class="pc-content" id="wifi">
+
+      <!--[ Main Content ] start-->
+      <div class="row">
+        <!--[ tabler-icon ] start-->
+        <div class="col-sm-12">
+          <h1>WiFi Setup</h1>
+          <div class="card">
+            <div class="card-header">
+              <div class="d-flex align-items-center justify-content-center gap-3 mt-3">
+                <button type="button" class="btn btn-primary" id="scan-btn">
+                  <i class="ti ti-wifi me-1"></i>Scan WiFi
+                </button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div id="loading" class="text-center">
+                <div class="spinner-border text-primary" role="status">
+                  <span class="visually-hidden">Loading...</span>
+                </div>
+                <p class="mt-2">Scanning for networks...</p>
+              </div>
+
+              <template id="wifi-network-template">
+                <div class="list-group-item d-flex justify-content-between align-items-center">
+                  <span class="network-name"></span>
+                  <button class="btn btn-primary btn-sm">
+                    <i class="ti ti-plug me-1"></i>Connect
+                  </button>
+                </div>
+              </template>
+
+              <div id="wifi-results">
+                <h5 class="mb-3">Available Networks</h5>
+                <div class="list-group" id="wifi-ssids">
+                  <!-- WiFi networks will be inserted here -->
+                </div>
+                <p id="no-networks" class="text-muted text-center mt-3 d-none">
+                  No networks found. Try scanning again.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!--[ tabler-icon ] end-->
+      </div>
+      <!--[ Main Content ] end-->
+
+    </div>
+
+  </div>
+  <!-- [ Main Content ] end -->
+  <footer class="pc-footer">
+    <div class="footer-wrapper container-fluid">
+      <div class="row">
+        <div class="col-sm my-1">
+          <p class="m-0">FSB Control Software crafted by Team 502. View us on <a href="https://github.com/GdeL441/fsb"
+              target="_blank">GitHub</a></p>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+
+
+  <script src="assets/js/pcoded.js"></script>
+
+  <script type="module" defer src="./main.js"></script>
+
+  <!-- <script>font_change("Public-Sans");</script> -->
+
+
+
+</body>
+<!-- [Body] end -->
+
 </html>

@@ -1,14 +1,77 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+use std::sync::{Arc, Mutex};
+
+use tauri::{Manager, State};
+use wifi_rs::{prelude::*, WiFi};
+
+// DS4 controller no longer needed, remove module reference
+
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
+async fn scan() -> Vec<String> {
+    println!("scan");
+    let wifi = tokio_wifiscanner::scan()
+        .await
+        .expect("Cannot scan network");
+    println!("{wifi:?}");
+    wifi.into_iter().map(|w| w.ssid).collect()
+}
+
+#[tauri::command]
+fn get_url() -> String {
+    "ws://192.168.4.1/ws".to_string()
+}
+
+#[tauri::command]
+fn connect(state: State<'_, AppData>, ssid: String) -> Option<String> {
+    println!("Connect to {ssid}");
+    let mut wifi = state.wifi.lock().unwrap();
+    // Using hardcoded "password" for WPA2 authentication
+    match wifi.connect(&ssid, "password") {
+        Ok(result) => {
+            if result == true {
+                println!("Connection Successful.");
+                // TODO: Discover with mDNS
+                return Some("ws://192.168.4.1/ws".to_string());
+            } else {
+                println!("Invalid password.");
+            }
+        }
+        Err(err) => println!("The following error occurred: {:?}", err),
+    }
+    None
+}
+
+
+#[derive(Clone, Debug)]
+struct AppData {
+    wifi: Arc<Mutex<WiFi>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let config = Some(Config {
+        interface: Some("en0"),
+    });
+
+    let wifi = Arc::new(Mutex::new(WiFi::new(config)));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            scan,
+            connect,
+            get_url,
+        ])
+        .setup(|app| {
+            #[cfg(debug_assertions)]
+            app.get_webview_window("main").unwrap().open_devtools();
+
+            app.manage(AppData {
+                wifi,
+            });
+
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
