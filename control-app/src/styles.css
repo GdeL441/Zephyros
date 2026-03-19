@@ -188,6 +188,7 @@
   padding: 0.25rem 1.25rem 0.5rem;
   border-left: 1px solid var(--bs-border-color, #e3e8ef);
   min-width: 88px;
+  margin-left: auto;
 }
 
 .fan-speed-icon {
@@ -242,4 +243,54 @@
   height: 150px;
   cursor: pointer;
   accent-color: var(--bs-primary, #4680ff);
+}
+
+/* ── LED Settings ─────────────────────────────────── */
+#led-color-canvas {
+  border-radius: 50%;
+  display: block;
+  transition: box-shadow 0.2s, outline 0.2s;
+}
+
+#led-color-canvas.active-color {
+  outline: 3px solid var(--bs-primary, #4680ff);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 6px rgba(70, 128, 255, 0.22);
+}
+
+/* Animation preset grid */
+.led-anim-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+
+.led-anim-btn {
+  background: var(--anim-color, #4680ff);
+  border: none;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.45rem 0.25rem;
+  border-radius: 8px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  transition: opacity .15s, transform .1s, box-shadow .15s;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .18);
+}
+
+.led-anim-btn:hover {
+  opacity: .88;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .22);
+  color: #fff;
+}
+
+.led-anim-btn:active {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.led-anim-btn.active-anim {
+  outline: 2px solid var(--bs-primary, #4680ff);
+  outline-offset: 2px;
 }

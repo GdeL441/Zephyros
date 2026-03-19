@@ -62,6 +62,8 @@ function computeMotorSpeeds(left_x, left_y, right_x, right_y) {
 // Update the position of a joystick's stick
 function updateJoystickPosition(joystickId, x, y) {
   const joystick = document.getElementById(joystickId);
+  if (!joystick) return;
+
 
   // Limit joystick values between -1 and 1
   const xPos = Math.min(Math.max(x, -1), 1);
@@ -145,7 +147,7 @@ async function connectWs(url) {
     document.getElementById("status").textContent = "Disconnected";
     updateConnectButton(false);
     ws = null;
-    
+
     // Stop and reset the timer when connection is lost
     stopTimer();
     resetTimer();
@@ -156,11 +158,12 @@ async function connectWs(url) {
     addToLog(data, 'received');
 
     if (data.type === "telemetry") {
-        document.getElementById('temp-display').innerText = `${data.temp}°C`;
-        document.getElementById('fan-status').innerText = `${data.fan_rpm} RPM`;
-        document.getElementById('uptime').innerText = `${data.uptime}`;
+      document.getElementById('power').innerText = `${data.power} W`;
+      document.getElementById('fan-status').innerText = `${data.fan_speed} %`;
+      document.getElementById('uptime').innerText = `${data.uptime}`;
+      document.getElementById('speed-display').innerText = `${data.air_speed} m/s`;
     }
-    
+
   };
   ws.onerror = error => {
     console.error(error);
@@ -169,13 +172,13 @@ async function connectWs(url) {
     statusDot.classList.add("bg-danger");
     updateConnectButton(false);
     ws = null;
-    
+
     // Stop and reset the timer when connection error occurs
     stopTimer();
     resetTimer();
   };
   const originalSend = ws.send;
-  ws.send = function(data) {
+  ws.send = function (data) {
     addToLog(JSON.parse(data), 'sent');
     originalSend.call(this, data);
   };
@@ -498,7 +501,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 
 
-   // This will set up the initial canvas size and draw the grid
+  // This will set up the initial canvas size and draw the grid
   loadThresholds()
   loadPID()
   loadSpeed()
@@ -517,7 +520,9 @@ window.addEventListener("DOMContentLoaded", () => {
   const clearBtn = document.querySelector("#clear-btn")
   const sidebarBtn = document.querySelector("#sidebar-hide")
   const manualBtn = document.querySelector("#manual-control-btn")
-  const calibrateBtn = document.querySelector("#calibrate-btn")
+  const calibrateBtn = document.querySelector("#calibrate-dps")
+
+  const testBtn = document.querySelector("#send-test")
 
   loading = document.querySelector("#loading")
   loading.classList.add("d-none")
@@ -529,14 +534,16 @@ window.addEventListener("DOMContentLoaded", () => {
   step = document.querySelector("#step")
   statusDot = document.querySelector("#status-dot")
 
-  sidebarBtn.addEventListener("click", () => {
-    resizeCanvas()
-    setTimeout(resizeCanvas, 500)
+  sidebarBtn?.addEventListener("click", () => {
+    if (document.getElementById('gridCanvas')) {
+      resizeCanvas()
+      setTimeout(resizeCanvas, 500)
+    }
   })
-  scanBtn.addEventListener("click", () => {
+  scanBtn?.addEventListener("click", () => {
     scan()
   })
-  connectBtn.addEventListener("click", async () => {
+  connectBtn?.addEventListener("click", async () => {
     if (ws) {
       ws.close();
       console.log('WebSocket connection closed');
@@ -553,7 +560,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  startBtn.addEventListener("click", async () => {
+  startBtn?.addEventListener("click", async () => {
     const startPos = dots.find(dot => dot.color == "start")
     if (startPos)
       drawDot(startPos.x, startPos.y, "N");
@@ -571,19 +578,19 @@ window.addEventListener("DOMContentLoaded", () => {
     startTimer() // Start the timer when the start button is pressed
   });
 
-  stopBtn.addEventListener("click", async () => {
+  stopBtn?.addEventListener("click", async () => {
     if (!ws) return
     ws.send(JSON.stringify({ action: "stop" }))
     stopTimer() // Stop the timer when the stop button is pressed
   });
 
-  resetBtn.addEventListener("click", async () => {
+  resetBtn?.addEventListener("click", async () => {
     if (!ws) return
     ws.send(JSON.stringify({ action: "reset" }))
     stopTimer()
     resetTimer()
     score = 0
-    document.querySelector("#score").innerText = score
+    document.querySelector("#score") && (document.querySelector("#score").innerText = score)
     currentPosition = {
       x: 6,
       y: 0,
@@ -592,12 +599,12 @@ window.addEventListener("DOMContentLoaded", () => {
     // Reset the counted towers arrays
     countedGreenTowers = [];
     countedRedTowers = [];
-    drawGrid()
+    if (document.getElementById('gridCanvas')) drawGrid()
   });
 
 
 
-  sensorsBtn.addEventListener("click", async () => {
+  sensorsBtn?.addEventListener("click", async () => {
     if (!ws) return;
 
     // Toggle monitoring state
@@ -629,7 +636,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  applyThresholdBtn.addEventListener("click", async () => {
+  applyThresholdBtn?.addEventListener("click", async () => {
     if (!ws) return
     let L = Number(document.querySelector("#left-sensor-threshold").value)
     let R = Number(document.querySelector("#right-sensor-threshold").value)
@@ -655,7 +662,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }))
   });
 
-  applyPIDBtn.addEventListener("click", async () => {
+  applyPIDBtn?.addEventListener("click", async () => {
     if (!ws) return
     let P = Number(document.querySelector("#kp-value").value)
     let I = Number(document.querySelector("#ki-value").value)
@@ -666,7 +673,7 @@ window.addEventListener("DOMContentLoaded", () => {
     ws.send(JSON.stringify({ action: "update_pid", P, I, D }))
   });
 
-  applySpeedBtn.addEventListener("click", async () => {
+  applySpeedBtn?.addEventListener("click", async () => {
     if (!ws) return
     let speed = Number(document.querySelector("#speed-value").value)
     let turnSpeed = Number(document.querySelector("#turn-speed-value").value)
@@ -676,16 +683,23 @@ window.addEventListener("DOMContentLoaded", () => {
 
     ws.send(JSON.stringify({ action: "update_speed", speed, turnSpeed }))
   });
-  clearBtn.addEventListener("click", async () => {
+
+  testBtn?.addEventListener("click", async () => {
+    if (!ws) return
+    ws.send(JSON.stringify({ type: "telemetry", fan_speed: 20, power: 40, uptime: 100 }))
+
+  });
+
+  clearBtn?.addEventListener("click", async () => {
     path = []
     dots = []
     solution = null
-    drawGrid()
+    if (document.getElementById('gridCanvas')) drawGrid()
   });
   window.addEventListener("keydown", keyPressed);
   window.addEventListener("keyup", keyUp);
 
-  manualBtn.addEventListener("click", async () => {
+  manualBtn?.addEventListener("click", async () => {
     if (!ws) return
 
     if (manualBtn.classList.contains("btn-primary")) {
@@ -705,7 +719,7 @@ window.addEventListener("DOMContentLoaded", () => {
     manual_control = !manual_control
   });
 
-  calibrateBtn.addEventListener("click", async () => {
+  calibrateBtn?.addEventListener("click", async () => {
     if (!ws) return;
 
     // Show a loading state on the button
@@ -878,9 +892,9 @@ function showCalibrationNotification() {
 // Add a function to handle red tower touches
 function handleRedTowerTouch() {
   // Create a unique identifier for the current position
-  const posKey = currentPosition.x !== null && currentPosition.y !== null ? 
+  const posKey = currentPosition.x !== null && currentPosition.y !== null ?
     `${currentPosition.x},${currentPosition.y}` : "manual";
-  
+
   // Only count if not already counted
   if (!countedRedTowers.includes(posKey)) {
     countedRedTowers.push(posKey);
@@ -904,10 +918,10 @@ function showRedTowerNotification() {
     notification.innerHTML = "Red tower touched! -50 points";
     document.body.appendChild(notification);
   }
-  
+
   // Show notification
   notification.classList.remove("d-none");
-  
+
   // Hide after 3 seconds
   setTimeout(() => {
     notification.classList.add("d-none");
@@ -925,10 +939,10 @@ window.addEventListener("DOMContentLoaded", () => {
     redTowerBtn.className = "btn btn-danger mt-2";
     redTowerBtn.textContent = "Red Tower Touched (-50)";
     redTowerBtn.style.width = "100%";
-    
+
     // Add the button after the score element
     scoreElement.parentElement.appendChild(redTowerBtn);
-    
+
     // Add event listener
     redTowerBtn.addEventListener("click", handleRedTowerTouch);
   }
@@ -948,9 +962,9 @@ function showAlreadyCountedNotification() {
     notification.innerHTML = "Tower already counted!";
     document.body.appendChild(notification);
   }
-  
+
   notification.classList.remove("d-none");
-  
+
   setTimeout(() => {
     notification.classList.add("d-none");
   }, 3000);
@@ -965,10 +979,10 @@ function showBonusNotification(points, seconds) {
     notification.className = "alert alert-success position-fixed top-0 end-0 m-3 d-none";
     document.body.appendChild(notification);
   }
-  
+
   notification.innerHTML = `Time bonus: +${points} points for ${seconds} seconds remaining!`;
   notification.classList.remove("d-none");
-  
+
   setTimeout(() => {
     notification.classList.add("d-none");
   }, 5000); // Show for 5 seconds

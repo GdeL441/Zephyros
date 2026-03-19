@@ -7,6 +7,20 @@ from adafruit_httpserver import Server, Request, Response, Websocket, GET
 import asyncio
 import board
 import digitalio
+import analogio
+import math
+
+
+# Pin setup:
+DPS_PIN = analogio.AnalogIn(board.A1) # Pin for the Differential Pressure Sensor # Normal voltage = 2.614V
+DIVISION_RATIO = 1.5 # Because of the 10K / 20K resistor divider
+AIR_DENSITY = 1.225 # kg/m^3
+
+sensor_baseline = 2.5 # 
+num_calibration_samples = 50
+smoothed_airspeed_ms = 0
+voltage_history = []
+
 
 # WiFi configuration
 SSID = "Zephyros"
@@ -62,6 +76,8 @@ async def handle_websocket_message(message):
         print(data)
         if 'brightness' in data:
             led.value = float(data['brightness']) > 0
+        elif data.get('action') == 'calibrate':
+            await calibrate_dps()
     except Exception as e:
         print("Error handling WebSocket message:", e)
 
@@ -116,19 +132,69 @@ async def sensor_broadcaster():
             # Gather all sensor data into one 'telemetry' packet
             telemetry = {
                 "type": "telemetry",
-                "temp": 20, #get_temp(),
-                "fan_rpm": 200,#current_fan_speed,
-                "uptime": time.monotonic()
+                "power": 21,
+                "fan_speed": 80, #current_fan_speed,
+                "uptime": time.monotonic(),
+                "air_speed": smoothed_airspeed_ms,
             }
             await send_websocket_message(telemetry)
+
         await asyncio.sleep(0.5)  # 2Hz is plenty for a UI
+
+
+# Outputs real DPS voltage (scaled from 3.3 to 5V)
+async def measure_dps(pin):
+    return float(( (pin.value * pin.reference_voltage) / 65535 ) * DIVISION_RATIO)
+
+
+async def measure_airspeed(window_size=8):
+    global smoothed_airspeed_ms, voltage_history
+
+
+    while True:
+        if current_websocket:
+            raw_voltage = await measure_dps(DPS_PIN)
+
+            # Smooth the ADC voltage readings
+            voltage_history.append(raw_voltage)
+            if len(voltage_history) > window_size:
+                voltage_history.pop(0)
+            smoothed_voltage = sum(voltage_history) / len(voltage_history)
+
+            # Convert smoothed voltage to airspeed
+            voltage_diff = smoothed_voltage - sensor_baseline
+            pressure_pa = (voltage_diff / 10) * 1000
+            
+            pressure_pa = max(0, pressure_pa)
+
+
+            smoothed_airspeed_ms = math.sqrt((2 * pressure_pa) / AIR_DENSITY)
+
+            print(f"Voltage smooth: {smoothed_voltage:.5f}V | Voltage raw: {raw_voltage:.5f}V | Airspeed: {smoothed_airspeed_ms:.2f} m/s")
+
+        await asyncio.sleep(0.05)
+        
+
+async def calibrate_dps():
+    global sensor_baseline
+    print("Calibrating Sensor")
+    calibration_baseline = 0
+    for _ in range(num_calibration_samples):
+        calibration_baseline += await measure_dps(DPS_PIN)
+        await asyncio.sleep(0)
+    sensor_baseline = calibration_baseline / num_calibration_samples
+    print(f"New sensor baseline: {sensor_baseline}")
+    return sensor_baseline
+
 
 
 # Run the main loop
 async def main():
     await asyncio.gather(
+        calibrate_dps(),
         run_server(),
         handle_websockets(),
+        measure_airspeed(),
         sensor_broadcaster(),
     )
 

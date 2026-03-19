@@ -1,6 +1,6 @@
 {
     "micropico.syncFolder": "micropython",
-    "python.languageServer": "Pylance",
+    "python.languageServer": "Jedi",
     "python.analysis.typeCheckingMode": "basic",
     "python.analysis.diagnosticSeverityOverrides": {
         "reportMissingModuleSource": "none"
