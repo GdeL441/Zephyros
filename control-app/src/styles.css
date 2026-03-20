@@ -2,18 +2,6 @@
   filter: drop-shadow(0 0 2em #ffe21c);
 }
 
-.grid-layout {
-  width: 100%;
-  height: 100%;
-  position: relative;
-}
-
-#gridCanvas {
-  width: 100% !important;
-  height: 100% !important;
-  display: block;
-}
-
 .pc-content {
   padding-top: 80px !important;
   min-height: 100vh;
@@ -25,113 +13,6 @@
 
 .pc-link {
   cursor: pointer !important;
-}
-
-.keyboard {
-  padding: 2.5em 0;
-  width: 190px;
-}
-
-.top-row {
-  width: 140px;
-  width: 190px;
-  margin: 0 auto;
-  display: inline-flex;
-  justify-content: center;
-}
-
-.bottom-row {
-  display: inline-flex;
-  justify-content: center;
-}
-
-.key {
-  background-color: gray;
-  border: 1px solid #4c4c4c;
-  border-radius: 4px;
-  color: #ffffff;
-  width: 50px;
-  height: 50px;
-  text-align: center;
-  transition: all 0.07s ease;
-}
-
-.activeKey {
-  background-color: #3c3c3c;
-}
-
-.key>p {
-  font-size: 2em;
-}
-
-.controller-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.joystick-container {
-  margin: 20px;
-  text-align: center;
-}
-
-.joystick {
-  width: 100px;
-  height: 100px;
-  border: 2px solid #333;
-  border-radius: 50%;
-  position: relative;
-  background-color: #ddd;
-}
-
-.stick {
-  width: 20px;
-  height: 20px;
-  background-color: #333;
-  border-radius: 50%;
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  transition: top 0.1s ease, left 0.1s ease;
-}
-
-
-.dpad {
-  width: 70px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-items: center;
-}
-
-.dpad-button {
-  width: 30px;
-  height: 30px;
-  font-size: 15px;
-  background-color: #ddd;
-  color: #333;
-  border: 2px solid #333;
-  border-radius: 10px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.dpad-button.active,
-.dpad-button:active {
-  background-color: #333;
-  color: white;
-}
-
-.horizontal-row {
-  display: flex;
-  width: 100%;
-  justify-content: space-between;
-  padding: 4px 0;
-}
-
-.spacer {
-  width: 60px;
 }
 
 /* Sensor value styling */
@@ -148,35 +29,6 @@
 
 .text-danger {
   color: #dc3545 !important;
-}
-
-/* Calibrate button styling */
-#calibrate-btn {
-  background-color: #17a2b8;
-  border-color: #17a2b8;
-  color: white;
-  transition: all 0.3s ease;
-}
-
-#calibrate-btn:hover {
-  background-color: #138496;
-  border-color: #117a8b;
-  box-shadow: 0 0 0 0.2rem rgba(23, 162, 184, 0.5);
-}
-
-#calibrate-btn:focus {
-  box-shadow: 0 0 0 0.2rem rgba(23, 162, 184, 0.5);
-}
-
-#calibrate-btn:active {
-  background-color: #117a8b;
-  border-color: #10707f;
-}
-
-#calibrate-btn:disabled {
-  background-color: #5bc0de;
-  border-color: #5bc0de;
-  opacity: 0.65;
 }
 
 /* Fan Speed Panel */
