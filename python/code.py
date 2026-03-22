@@ -94,7 +94,7 @@ async def handle_websocket_message(message):
             Kd = data.get('Kd', Kd)
             division_ratio = data.get('division_ratio', division_ratio)
             air_density = data.get('air_density', air_density)
-            asyncio.wait(0.5)
+            await asyncio.sleep(0.1)
             await send_current_settings()
 
 
@@ -205,7 +205,7 @@ async def measure_airspeed(window_size=8):
 
             smoothed_airspeed_ms = math.sqrt((2 * pressure_pa) / air_density)
 
-            print(f"Voltage smooth: {smoothed_voltage:.5f}V | Voltage raw: {raw_voltage:.5f}V | Airspeed: {smoothed_airspeed_ms:.2f} m/s")
+            #print(f"Voltage smooth: {smoothed_voltage:.5f}V | Voltage raw: {raw_voltage:.5f}V | Airspeed: {smoothed_airspeed_ms:.2f} m/s")
 
         await asyncio.sleep(0.05)
         
