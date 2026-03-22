@@ -23,13 +23,51 @@ document.getElementById('clear-log-btn').addEventListener('click', () => {
 const fanSpeedSlider = document.getElementById('fan-speed-slider');
 const fanSpeedValueEl = document.getElementById('fan-speed-value');
 
+function updateSliderBackground() {
+  const percentage = (fanSpeedSlider.value - fanSpeedSlider.min) / (fanSpeedSlider.max - fanSpeedSlider.min) * 100;
+  fanSpeedSlider.style.background = `linear-gradient(to right, var(--bs-primary, #4680ff) ${percentage}%, #e9ecef ${percentage}%)`;
+}
+
+// Set initial slider fill
+updateSliderBackground();
+
 fanSpeedSlider.addEventListener('input', () => {
-  fanSpeedValueEl.textContent = fanSpeedSlider.value;
+  if (document.activeElement !== fanSpeedValueEl) {
+    fanSpeedValueEl.textContent = fanSpeedSlider.value;
+  }
+  updateSliderBackground();
 });
 
 fanSpeedSlider.addEventListener('change', () => {
   if (!ws) return;
   ws.send(JSON.stringify({ action: 'set_fan_speed', speed: Number(fanSpeedSlider.value) }));
+});
+
+fanSpeedValueEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    fanSpeedValueEl.blur(); // Blur triggers the change logic
+  }
+});
+
+fanSpeedValueEl.addEventListener('blur', () => {
+  let val = parseInt(fanSpeedValueEl.textContent);
+  if (isNaN(val)) {
+    val = Number(fanSpeedSlider.value);
+  } else {
+    val = Math.max(0, Math.min(100, val));
+  }
+  
+  fanSpeedValueEl.textContent = val;
+  
+  if (Number(fanSpeedSlider.value) !== val) {
+    fanSpeedSlider.value = val;
+    updateSliderBackground();
+    
+    if (ws) {
+      ws.send(JSON.stringify({ action: 'set_fan_speed', speed: val }));
+    }
+  }
 });
 
 
@@ -73,10 +111,23 @@ async function connectWs(url) {
     addToLog(data, 'received');
 
     if (data.type === "telemetry") {
-      document.getElementById('power').innerText = `${data.power} W`;
-      document.getElementById('fan-status').innerText = `${data.fan_speed} %`;
-      document.getElementById('uptime').innerText = `${data.uptime}`;
-      document.getElementById('speed-display').innerText = `${data.air_speed} m/s`;
+      const fmtTel = (v, unit, decimals = 4) => (v != null ? `${Number(v).toFixed(decimals)} ${unit}` : `- ${unit}`);
+      document.getElementById('fan-status').innerText = fmtTel(data.fan_speed, '%', 0);
+      document.getElementById('uptime').innerText = fmtTel(data.uptime, 's', 0);
+      document.getElementById('speed-display').innerText = fmtTel(data.air_speed, 'm/s', 2);
+      document.getElementById('voltage').innerText = fmtTel(data.voltage, 'V', 2);
+      document.getElementById('resistance').innerText = fmtTel(data.resistance, 'Ω', 0);
+      document.getElementById('power').innerText = fmtTel(data.power, 'mW', 2);
+    }
+
+    if (data.type === "settings") {
+      const fmt = v => (v != null ? Number(v).toFixed(4) : '—');
+      document.getElementById('kp-current').innerText = fmt(data.Kp);
+      document.getElementById('ki-current').innerText = fmt(data.Ki);
+      document.getElementById('kd-current').innerText = fmt(data.Kd);
+      document.getElementById('baseline-current').innerText = fmt(data.sensor_baseline);
+      document.getElementById('division-current').innerText = fmt(data.division_ratio);
+      document.getElementById('density-current').innerText = fmt(data.air_density);
     }
 
   };
@@ -151,18 +202,16 @@ let ssids, loading, ipInput, statusDot
 
 // Initial setup when the page loads
 window.addEventListener("DOMContentLoaded", () => {
-  loadThresholds()
-  loadPID()
-  loadSpeed()
+  persistInputs()
 
   const connectBtn = document.querySelector("#connect-btn");
   const scanBtn = document.querySelector("#scan-btn")
   const sensorsBtn = document.querySelector("#monitor-btn")
-  const applyThresholdBtn = document.querySelector("#apply-thresholds-btn")
-  const applySpeedBtn = document.querySelector("#apply-speed-btn")
-  const applyPIDBtn = document.querySelector("#apply-pid-btn")
+  const getSettingsBtn = document.querySelector("#get-settings-btn")
+  const applySettingsBtn = document.querySelector("#apply-settings-btn")
   const calibrateBtn = document.querySelector("#calibrate-dps")
   const testBtn = document.querySelector("#send-test")
+  const startFanBtn = document.querySelector("#start-fan")
 
   loading = document.querySelector("#loading")
   loading.classList.add("d-none")
@@ -191,6 +240,13 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  ipInput?.addEventListener("keyup", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      connectBtn?.click();
+    }
+  });
+
   sensorsBtn?.addEventListener("click", async () => {
     if (!ws) return;
 
@@ -213,7 +269,7 @@ window.addEventListener("DOMContentLoaded", () => {
     sensorsBtn.setAttribute("data-monitoring", newMonitoringState);
 
     // Send command to server
-    ws.send(JSON.stringify({ action: "monitor_sensor" }));
+    ws.send(JSON.stringify({ action: newMonitoringState ? "start_monitor" : "stop_monitor" }));
 
     // If starting monitoring, clear previous values
     if (newMonitoringState) {
@@ -223,52 +279,47 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  applyThresholdBtn?.addEventListener("click", async () => {
-    if (!ws) return
-    let L = Number(document.querySelector("#left-sensor-threshold").value)
-    let R = Number(document.querySelector("#right-sensor-threshold").value)
-    let B = Number(document.querySelector("#back-sensor-threshold").value)
-    let L_R_calibration_threshold = Number(document.querySelector("#calibration-threshold").value)
-    let B_calibration_threshold = Number(document.querySelector("#back-calibration-threshold").value)
+  startFanBtn?.addEventListener("click", async () => {
+    if (!ws) return;
 
-    // Validate calibration thresholds are within range
-    L_R_calibration_threshold = Math.min(Math.max(L_R_calibration_threshold, 0.1), 1.0);
-    B_calibration_threshold = Math.min(Math.max(B_calibration_threshold, 0.1), 1.0);
+    // Toggle fan active state
+    const isCurrentlyActive = startFanBtn.getAttribute("data-fan-active") === "true";
+    const newActiveState = !isCurrentlyActive;
 
-    thresholds = { L, R, B, L_R_calibration_threshold, B_calibration_threshold }
-    // Save to localStorage
-    localStorage.setItem("thresholds", JSON.stringify(thresholds));
+    // Update button appearance
+    if (newActiveState) {
+      startFanBtn.classList.remove("btn-success");
+      startFanBtn.classList.add("btn-danger");
+      startFanBtn.textContent = "Stop Fan";
+    } else {
+      startFanBtn.classList.remove("btn-danger");
+      startFanBtn.classList.add("btn-success");
+      startFanBtn.textContent = "Start Fan";
+    }
 
+    // Update data attribute
+    startFanBtn.setAttribute("data-fan-active", newActiveState);
+
+    // Send command to server
+    ws.send(JSON.stringify({ action: newActiveState ? "start_fan" : "stop_fan" }));
+  });
+
+  getSettingsBtn?.addEventListener("click", () => {
+    if (!ws) return;
+    ws.send(JSON.stringify({ action: "send_settings" }));
+  });
+
+  applySettingsBtn?.addEventListener("click", () => {
+    if (!ws) return;
     ws.send(JSON.stringify({
-      action: "set_threshold",
-      L,
-      R,
-      B,
-      L_R_calibration_threshold,
-      B_calibration_threshold
-    }))
-  });
-
-  applyPIDBtn?.addEventListener("click", async () => {
-    if (!ws) return
-    let P = Number(document.querySelector("#kp-value").value)
-    let I = Number(document.querySelector("#ki-value").value)
-    let D = Number(document.querySelector("#kd-value").value)
-    // Save to localStorage
-    localStorage.setItem("pid", JSON.stringify({ P, I, D }));
-
-    ws.send(JSON.stringify({ action: "update_pid", P, I, D }))
-  });
-
-  applySpeedBtn?.addEventListener("click", async () => {
-    if (!ws) return
-    let speed = Number(document.querySelector("#speed-value").value)
-    let turnSpeed = Number(document.querySelector("#turn-speed-value").value)
-    speeds = { speed, turnSpeed }
-    // Save to localStorage
-    localStorage.setItem("speed", JSON.stringify({ speed, turnSpeed }));
-
-    ws.send(JSON.stringify({ action: "update_speed", speed, turnSpeed }))
+      action: "new_settings",
+      sensor_baseline: Number(document.getElementById("baseline-value").value),
+      Kp: Number(document.getElementById("kp-value").value),
+      Ki: Number(document.getElementById("ki-value").value),
+      Kd: Number(document.getElementById("kd-value").value),
+      division_ratio: Number(document.getElementById("division-value").value),
+      air_density: Number(document.getElementById("density-value").value),
+    }));
   });
 
   testBtn?.addEventListener("click", async () => {
@@ -294,71 +345,44 @@ window.addEventListener("DOMContentLoaded", () => {
   });
 });
 
-let thresholds
-function loadThresholds() {
-  let savedThresholds = localStorage.getItem("thresholds");
-  console.log(savedThresholds)
 
-  if (savedThresholds) {
-    let { L, R, B, L_R_calibration_threshold, B_calibration_threshold } = JSON.parse(savedThresholds);
-    thresholds = { L, R, B, L_R_calibration_threshold, B_calibration_threshold }
-    setThresholds(L, R, B, L_R_calibration_threshold, B_calibration_threshold)
+// Persist individual input values to localStorage.
+// Each input uses its own key: "input:<id>".
+// Legacy "pid" key is migrated on first load.
+const PERSISTED_INPUTS = [
+  'kp-value',
+  'ki-value',
+  'kd-value',
+  'baseline-value',
+  'division-value',
+  'density-value',
+];
+
+function persistInputs() {
+  // Migrate old "pid" bundle into individual keys
+  const oldPID = localStorage.getItem('pid');
+  if (oldPID) {
+    try {
+      const { P, I, D } = JSON.parse(oldPID);
+      if (P != null && !localStorage.getItem('input:kp-value')) localStorage.setItem('input:kp-value', P);
+      if (I != null && !localStorage.getItem('input:ki-value')) localStorage.setItem('input:ki-value', I);
+      if (D != null && !localStorage.getItem('input:kd-value')) localStorage.setItem('input:kd-value', D);
+    } catch { }
+    localStorage.removeItem('pid');
   }
+
+  PERSISTED_INPUTS.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+
+    // Restore saved value
+    const saved = localStorage.getItem(`input:${id}`);
+    if (saved !== null) el.value = saved;
+
+    // Save on every change (fires when user commits a value)
+    el.addEventListener('change', () => {
+      localStorage.setItem(`input:${id}`, el.value);
+    });
+  });
 }
 
-function setThresholds(L, R, B, L_R_calibration_threshold, B_calibration_threshold) {
-  document.querySelector("#left-sensor-threshold").value = L;
-  document.querySelector("#right-sensor-threshold").value = R;
-  document.querySelector("#back-sensor-threshold").value = B;
-  document.querySelector("#calibration-threshold").value = L_R_calibration_threshold || 0.8;
-  document.querySelector("#back-calibration-threshold").value = B_calibration_threshold || 0.9;
-}
-
-function loadPID() {
-  let savedPID = localStorage.getItem("pid");
-  console.log(savedPID)
-
-  if (savedPID) {
-    let { P, I, D } = JSON.parse(savedPID);
-    setPID(P, I, D)
-  }
-}
-
-function setPID(P, I, D) {
-  document.querySelector("#kp-value").value = P
-  document.querySelector("#ki-value").value = I
-  document.querySelector("#kd-value").value = D
-}
-
-let speeds
-function loadSpeed() {
-  let savedSpeed = localStorage.getItem("speed");
-  console.log(savedSpeed)
-
-  if (savedSpeed) {
-    let { speed, turnSpeed } = JSON.parse(savedSpeed);
-    speeds = { speed, turnSpeed }
-    setSpeed(speed, turnSpeed)
-  }
-}
-
-function setSpeed(speed, turnSpeed) {
-  document.querySelector("#speed-value").value = speed
-  document.querySelector("#turn-speed-value").value = turnSpeed
-}
-
-// Update sensor value display with color coding
-function updateSensorValueDisplay(elementId, value, threshold) {
-  const element = document.getElementById(elementId);
-  if (!element) return;
-
-  element.textContent = value;
-
-  if (value < threshold) {
-    element.classList.remove("text-success");
-    element.classList.add("text-danger");
-  } else {
-    element.classList.remove("text-danger");
-    element.classList.add("text-success");
-  }
-}

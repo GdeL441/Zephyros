@@ -13,13 +13,19 @@ import math
 
 # Pin setup:
 DPS_PIN = analogio.AnalogIn(board.A1) # Pin for the Differential Pressure Sensor # Normal voltage = 2.614V
-DIVISION_RATIO = 1.5 # Because of the 10K / 20K resistor divider
-AIR_DENSITY = 1.225 # kg/m^3
 
+# For DPS
+division_ratio = 1.5 # Because of the 10K / 20K resistor divider
+air_density = 1.225 # kg/m^3
 sensor_baseline = 2.5 # 
 num_calibration_samples = 50
 smoothed_airspeed_ms = 0
 voltage_history = []
+
+# PID parameters (for fan control which will be implemented later)
+Kp = 0
+Ki = 0
+Kd = 0
 
 
 # WiFi configuration
@@ -70,14 +76,28 @@ def ws_handler(request: Request):
     asyncio.create_task(blink(2))
     return websocket
 
+
 async def handle_websocket_message(message):
+    global sensor_baseline, Kp, Ki, Kd, division_ratio, air_density
     try:
         data = json.loads(message)
         print(data)
-        if 'brightness' in data:
-            led.value = float(data['brightness']) > 0
-        elif data.get('action') == 'calibrate':
+
+        if data.get('action') == 'calibrate':
             await calibrate_dps()
+        elif data.get('action') == 'send_settings':
+            await send_current_settings()
+        elif data.get('action') == 'new_settings':
+            sensor_baseline = data.get('sensor_baseline', sensor_baseline)
+            Kp = data.get('Kp', Kp)
+            Ki = data.get('Ki', Ki)
+            Kd = data.get('Kd', Kd)
+            division_ratio = data.get('division_ratio', division_ratio)
+            air_density = data.get('air_density', air_density)
+            asyncio.wait(0.5)
+            await send_current_settings()
+
+
     except Exception as e:
         print("Error handling WebSocket message:", e)
 
@@ -132,19 +152,34 @@ async def sensor_broadcaster():
             # Gather all sensor data into one 'telemetry' packet
             telemetry = {
                 "type": "telemetry",
-                "power": 21,
+                "voltage": 0.3, # get voltage from ADC0
+                "resistance" : 10000, # this has to be changeable from frontend
+                "power": 10, # in mW
+                "air_speed": smoothed_airspeed_ms,
                 "fan_speed": 80, #current_fan_speed,
                 "uptime": time.monotonic(),
-                "air_speed": smoothed_airspeed_ms,
+
             }
             await send_websocket_message(telemetry)
 
         await asyncio.sleep(0.5)  # 2Hz is plenty for a UI
 
+async def send_current_settings():
+    if current_websocket:
+        settings = {
+            "type": "settings",
+            "sensor_baseline" : sensor_baseline,
+            "Kp" : Kp, # to be adjusted to real Kp, idem for other parameters
+            "Ki" : Ki,
+            "Kd": Kd,
+            "division_ratio": division_ratio,
+            "air_density" : air_density,
+        }
+        await send_websocket_message(settings)
 
 # Outputs real DPS voltage (scaled from 3.3 to 5V)
 async def measure_dps(pin):
-    return float(( (pin.value * pin.reference_voltage) / 65535 ) * DIVISION_RATIO)
+    return float(( (pin.value * pin.reference_voltage) / 65535 ) * division_ratio)
 
 
 async def measure_airspeed(window_size=8):
@@ -168,7 +203,7 @@ async def measure_airspeed(window_size=8):
             pressure_pa = max(0, pressure_pa)
 
 
-            smoothed_airspeed_ms = math.sqrt((2 * pressure_pa) / AIR_DENSITY)
+            smoothed_airspeed_ms = math.sqrt((2 * pressure_pa) / air_density)
 
             print(f"Voltage smooth: {smoothed_voltage:.5f}V | Voltage raw: {raw_voltage:.5f}V | Airspeed: {smoothed_airspeed_ms:.2f} m/s")
 

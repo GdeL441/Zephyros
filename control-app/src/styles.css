@@ -146,3 +146,74 @@
   outline: 2px solid var(--bs-primary, #4680ff);
   outline-offset: 2px;
 }
+
+/* Settings current-value labels */
+#kp-current,
+#ki-current,
+#kd-current,
+#baseline-current,
+#division-current,
+#density-current {
+  font-family: 'Courier New', Courier, monospace;
+  font-variant-numeric: tabular-nums;
+  display: inline-block;
+  min-width: 6.5ch;
+  text-align: right;
+}
+
+/* ── Premium Fan Speed Slider ─────────────────────── */
+.custom-fan-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 12px;
+  background: #e9ecef;
+  border-radius: 12px;
+  outline: none;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: background 0.1s;
+}
+
+.custom-fan-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 4px solid var(--bs-primary, #4680ff);
+  box-shadow: 0 4px 8px rgba(70, 128, 255, 0.25);
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.4, 0.0, 0.2, 1), box-shadow 0.15s;
+}
+
+.custom-fan-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+  box-shadow: 0 6px 14px rgba(70, 128, 255, 0.4);
+}
+
+.custom-fan-slider::-webkit-slider-thumb:active {
+  transform: scale(0.95);
+  box-shadow: 0 2px 6px rgba(70, 128, 255, 0.3);
+}
+
+.custom-fan-slider::-moz-range-thumb {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 4px solid var(--bs-primary, #4680ff);
+  box-shadow: 0 4px 8px rgba(70, 128, 255, 0.25);
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.4, 0.0, 0.2, 1), box-shadow 0.15s;
+}
+
+.custom-fan-slider::-moz-range-thumb:hover {
+  transform: scale(1.1);
+  box-shadow: 0 6px 14px rgba(70, 128, 255, 0.4);
+}
+
+.custom-fan-slider::-moz-range-thumb:active {
+  transform: scale(0.95);
+  box-shadow: 0 2px 6px rgba(70, 128, 255, 0.3);
+}

@@ -6,13 +6,20 @@ use wifi_rs::{prelude::*, WiFi};
 // DS4 controller no longer needed, remove module reference
 
 #[tauri::command]
-async fn scan() -> Vec<String> {
+fn scan() -> Result<Vec<String>, String> {
     println!("scan");
-    let wifi = tokio_wifiscanner::scan()
-        .await
-        .expect("Cannot scan network");
-    println!("{wifi:?}");
-    wifi.into_iter().map(|w| w.ssid).collect()
+    match wifi_scan::scan() {
+        Ok(networks) => {
+            println!("{networks:?}");
+            Ok(networks.into_iter().filter_map(|w| {
+                if w.ssid.is_empty() { None } else { Some(w.ssid) }
+            }).collect())
+        }
+        Err(e) => {
+            println!("Scan error: {e:?}");
+            Err(format!("{e:?}"))
+        }
+    }
 }
 
 #[tauri::command]
