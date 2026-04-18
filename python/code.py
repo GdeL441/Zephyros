@@ -2,25 +2,116 @@ import time
 import json
 import wifi
 import socketpool
-import mdns
 from adafruit_httpserver import Server, Request, Response, Websocket, GET
 import asyncio
 import board
 import digitalio
-import analogio
 import math
+import busio
+import struct
 
+# ── UART / DimmerLink setup ───────────────────────────────────────────────────
+uart = busio.UART(tx=board.GP4, rx=board.GP5, baudrate=115200)
+current_fan_speed = 0  # 0–100 %
 
-# Pin setup:
-DPS_PIN = analogio.AnalogIn(board.A1) # Pin for the Differential Pressure Sensor # Normal voltage = 2.614V
+def dimmer_set_speed(percent: int):
+    """
+    Send a 4-byte SET command to DimmerLink over UART (115200 8N1).
+    Packet: 0x02 (start) | 0x53 (SET) | 0x00 (channel) | level (0-100)
+    """
+    percent = max(0, min(100, int(percent)))
+    uart.write(bytes([0x02, 0x53, 0x00, percent]))
+    print(f"DimmerLink: set speed to {percent}%")
 
-# For DPS
+# ── I2C & SDP810 setup ────────────────────────────────────────────────────────
+try:
+    i2c = busio.I2C(scl=board.GP1, sda=board.GP0, frequency=100_000)
+except RuntimeError as e:
+    print(f"I2C init failed: {e}")
+    i2c = None
+
+SDP810_ADDR       = 0x25
+CMD_START_AVG     = bytes([0x36, 0x08])  # continuous measurement, averaged
+CMD_STOP          = bytes([0x3F, 0xF9])
+_sdp810_buf       = bytearray(9)         # pre-allocated, avoids GC pressure
+_sdp810_running   = False
+
+# ── CRC-8 (poly 0x31, init 0xFF) ─────────────────────────────────────────────
+def _crc8(data: bytes) -> int:
+    crc = 0xFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x31) if (crc & 0x80) else (crc << 1)
+            crc &= 0xFF
+    return crc
+
+def _sdp810_write(cmd: bytes):
+    if i2c is None:
+        raise OSError("I2C not initialised")
+    while not i2c.try_lock():
+        pass
+    try:
+        i2c.writeto(SDP810_ADDR, cmd)
+    finally:
+        i2c.unlock()
+
+# Replace your sdp810_start() call and the measure_airspeed loop:
+
+_sdp810_available = False
+
+def sdp810_start():
+    global _sdp810_running, _sdp810_available
+    try:
+        _sdp810_write(CMD_START_AVG)
+        _sdp810_running = True
+        _sdp810_available = True
+        time.sleep(0.020)
+        print("SDP810 ready")
+    except (RuntimeError, OSError) as e:
+        print(f"SDP810 not found, running without sensor: {e}")
+        _sdp810_available = False
+
+def sdp810_stop():
+    global _sdp810_running
+    _sdp810_write(CMD_STOP)
+    _sdp810_running = False
+
+def sdp810_read() -> tuple:
+    """
+    Read one measurement frame (9 bytes) and return (pressure_pa, temperature_c).
+    Raises ValueError on CRC mismatch.
+    """
+    while not i2c.try_lock():
+        pass
+    try:
+        i2c.readfrom_into(SDP810_ADDR, _sdp810_buf)
+    finally:
+        i2c.unlock()
+
+    # Verify all three CRCs
+    if _crc8(_sdp810_buf[0:2]) != _sdp810_buf[2]:
+        raise ValueError("SDP810 CRC fail: pressure bytes")
+    if _crc8(_sdp810_buf[3:5]) != _sdp810_buf[5]:
+        raise ValueError("SDP810 CRC fail: temperature bytes")
+    if _crc8(_sdp810_buf[6:8]) != _sdp810_buf[8]:
+        raise ValueError("SDP810 CRC fail: scale factor bytes")
+
+    # struct.unpack ">h" = big-endian signed int16 — safe in all CircuitPython versions
+    raw_pressure  = struct.unpack(">h", _sdp810_buf[0:2])[0]
+    raw_temp      = struct.unpack(">h", _sdp810_buf[3:5])[0]
+    scale_factor  = struct.unpack(">h", _sdp810_buf[6:8])[0]
+
+    pressure_pa    = raw_pressure  / scale_factor   # Pa
+    temperature_c  = raw_temp      / 200.0          # °C
+
+    return pressure_pa, temperature_c
+
+# ── Air data ──────────────────────────────────────────────────────────────────
 division_ratio = 2.739 / 1.835
 R_SPECIFIC = 287.05 # J/(kg·K)
-sensor_baseline = 2.5
-num_calibration_samples = 50
 smoothed_airspeed_ms = 0
-voltage_history = []
+
 current_temperate = 15 # °C
 current_pressure = 101325 # Pa
 air_density = current_pressure / (R_SPECIFIC * (current_temperate + 273.15))
@@ -79,19 +170,26 @@ def ws_handler(request: Request):
     asyncio.create_task(blink(2))
     return websocket
 
-
 async def handle_websocket_message(message):
-    global sensor_baseline, Kp, Ki, Kd, division_ratio, air_density
+    global Kp, Ki, Kd, division_ratio, air_density, current_fan_speed
     try:
         data = json.loads(message)
         print(data)
 
         if data.get('action') == 'calibrate':
-            await calibrate_dps()
+            # SDP810 is self-zeroing — re-start continuous mode to trigger
+            # the sensor's internal zero-point calibration sequence
+            sdp810_stop()
+            await asyncio.sleep(0.05)
+            sdp810_start()
+            print("SDP810 re-started (self-zero applied)")
         elif data.get('action') == 'send_settings':
             await send_current_settings()
+        elif data.get('action') == 'set_fan_speed':
+            speed = data.get('speed', current_fan_speed)
+            current_fan_speed = speed
+            dimmer_set_speed(speed)
         elif data.get('action') == 'new_settings':
-            sensor_baseline = data.get('sensor_baseline', sensor_baseline)
             Kp = data.get('Kp', Kp)
             Ki = data.get('Ki', Ki)
             Kd = data.get('Kd', Kd)
@@ -99,7 +197,6 @@ async def handle_websocket_message(message):
             air_density = data.get('air_density', air_density)
             await asyncio.sleep(0.1)
             await send_current_settings()
-
 
     except Exception as e:
         print("Error handling WebSocket message:", e)
@@ -112,8 +209,7 @@ async def send_websocket_message(data, important=False):
     if not important and (current_time - last_message_time < MIN_MESSAGE_INTERVAL):
         return False
     try:
-        json_data = json.dumps(data)
-        current_websocket.send_message(json_data)
+        current_websocket.send_message(json.dumps(data))
         last_message_time = current_time
         return True
     except Exception as e:
@@ -146,90 +242,73 @@ async def run_server():
             print("Server poll error:", e)
         await asyncio.sleep(0)
 
-
-# here comes the code that sends sensor data
-# To do, change dummy data to real readings.
 async def sensor_broadcaster():
     while True:
         if current_websocket:
-            # Gather all sensor data into one 'telemetry' packet
             telemetry = {
-                "type": "telemetry",
-                "voltage": 0.3, # get voltage from ADC0
-                "resistance" : 10000, # this has to be changeable from frontend
-                "power": 10, # in mW
-                "air_speed": smoothed_airspeed_ms,
-                "fan_speed": 80, #current_fan_speed,
-                "uptime": time.monotonic(),
-
+                "type":       "telemetry",
+                "voltage":    0.3,
+                "resistance": 10000,
+                "power":      10,
+                "air_speed":  smoothed_airspeed_ms,
+                "fan_speed":  current_fan_speed,
+                "uptime":     time.monotonic(),
             }
             await send_websocket_message(telemetry)
-
-        await asyncio.sleep(0.5)  # 2Hz is plenty for a UI
+        await asyncio.sleep(0.5)
 
 async def send_current_settings():
     if current_websocket:
         settings = {
-            "type": "settings",
-            "sensor_baseline" : sensor_baseline,
-            "Kp" : Kp, # to be adjusted to real Kp, idem for other parameters
-            "Ki" : Ki,
-            "Kd": Kd,
+            "type":           "settings",
+            "Kp":             Kp,
+            "Ki":             Ki,
+            "Kd":             Kd,
             "division_ratio": division_ratio,
-            "air_density" : air_density,
+            "air_density":    air_density,
         }
         await send_websocket_message(settings)
 
-# Outputs real DPS voltage (scaled from 3.3 to 5V)
-async def measure_dps(pin):
-    return float(( (pin.value * pin.reference_voltage) / 65535 ) * division_ratio)
-
-
-async def measure_airspeed(window_size=8):
-    global smoothed_airspeed_ms, voltage_history
-
+async def measure_airspeed():
+    """
+    Continuously reads the SDP810 and updates smoothed_airspeed_ms.
+    No software smoothing needed — CMD_START_AVG already averages all
+    sensor samples accumulated between reads (~25 samples at 20 Hz polling).
+    Temperature is also captured from each frame to keep air_density current.
+    """
+    global smoothed_airspeed_ms, air_density, current_temperate
 
     while True:
-        if current_websocket:
-            raw_voltage = await measure_dps(DPS_PIN)
+        if _sdp810_available:
+            try:
+                pressure_pa, temperature_c = sdp810_read()
+                print(f"Pressure: {pressure_pa} Pa, Temperature: {temperature_c} °C")
+                # Keep air density updated using live temperature from the sensor
+                current_temperate = temperature_c
+                air_density = current_pressure / (R_SPECIFIC * (temperature_c + 273.15))
 
-            # Smooth the ADC voltage readings
-            voltage_history.append(raw_voltage)
-            if len(voltage_history) > window_size:
-                voltage_history.pop(0)
-            smoothed_voltage = sum(voltage_history) / len(voltage_history)
+                # Negative pressure = reversed flow or noise at zero — clamp to 0
+                pressure_pa = max(0.0, pressure_pa)
 
-            # Convert smoothed voltage to airspeed
-            voltage_diff = smoothed_voltage - sensor_baseline
-            pressure_pa = (voltage_diff / 10) * 1000
-            
-            pressure_pa = max(0, pressure_pa)
+                smoothed_airspeed_ms = math.sqrt((2.0 * pressure_pa) / air_density)
 
+            except ValueError as e:
+                # CRC mismatch — skip this frame, not a fatal error
+                print(f"SDP810 read error (skipping frame): {e}")
+            except OSError as e:
+                # I2C bus error — sensor may have been disconnected
+                print(f"SDP810 I2C error: {e}")
+                await asyncio.sleep(1.0)  # back off before retrying
 
-            smoothed_airspeed_ms = math.sqrt((2 * pressure_pa) / air_density)
+        await asyncio.sleep(0.05)  # 20 Hz
 
-            #print(f"Voltage smooth: {smoothed_voltage:.5f}V | Voltage raw: {raw_voltage:.5f}V | Airspeed: {smoothed_airspeed_ms:.2f} m/s")
-
-        await asyncio.sleep(0.05)
-        
-
-async def calibrate_dps():
-    global sensor_baseline
-    print("Calibrating Sensor")
-    calibration_baseline = 0
-    for _ in range(num_calibration_samples):
-        calibration_baseline += await measure_dps(DPS_PIN)
-        await asyncio.sleep(0)
-    sensor_baseline = calibration_baseline / num_calibration_samples
-    print(f"New sensor baseline: {sensor_baseline}")
-    return sensor_baseline
-
-
-
-# Run the main loop
 async def main():
+    # Start the SDP810 before launching tasks
+    print("Starting SDP810 continuous measurement...")
+    sdp810_start()
+
+
     await asyncio.gather(
-        calibrate_dps(),
         run_server(),
         handle_websockets(),
         measure_airspeed(),
