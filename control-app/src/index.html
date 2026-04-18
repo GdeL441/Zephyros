@@ -133,13 +133,36 @@
               </div>
             </div>
           </div>
-          <div class="card" style="margin-bottom: 0; min-height: 450px;">
+          <div class="card" style="margin-bottom: 0; min-height: 520px;" id="graph-card">
             <div class="card-body d-flex flex-column h-100">
-              <div class="d-flex gap-4 flex-grow-1">
-                <div class="flex-grow-1 min-w-0 d-flex flex-column">
-                  <h6 class="mb-3 f-w-400 text-muted">Graph Power output</h6>
-                  <h6 class="mb-3 f-w-400 text-muted">To be implemented in future updates</h6>
+              <!-- Graph toolbar -->
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0 f-w-400 text-muted" id="graph-title">Live Data Graph</h6>
+                <div class="d-flex gap-2 align-items-center">
+                  <button type="button" class="btn btn-success btn-sm" id="graph-toggle-btn" data-graphing="false">
+                    <i class="ti ti-player-play me-1"></i><span id="graph-toggle-text">Start Graphing</span>
+                  </button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm" id="graph-clear-btn" title="Clear graph data">
+                    <i class="ti ti-trash"></i>
+                  </button>
+                  <button type="button" class="btn btn-outline-primary btn-sm" id="graph-export-btn" title="Export as CSV">
+                    <i class="ti ti-download me-1"></i>CSV
+                  </button>
                 </div>
+              </div>
+              <!-- Canvas container -->
+              <div class="graph-canvas-wrap flex-grow-1 position-relative">
+                <canvas id="graph-canvas"></canvas>
+                <div class="graph-no-data-overlay" id="graph-no-data">
+                  <div class="text-center text-muted">
+                    <i class="ti ti-chart-line" style="font-size: 2.5rem; opacity: 0.3;"></i>
+                    <p class="mb-0 mt-2" style="font-size: 0.85rem;">Press <strong>Start Graphing</strong> to begin recording data</p>
+                  </div>
+                </div>
+              </div>
+              <!-- Legend -->
+              <div class="graph-legend mt-2" id="graph-legend">
+                <!-- Legend chips inserted by JS -->
               </div>
             </div>
           </div>

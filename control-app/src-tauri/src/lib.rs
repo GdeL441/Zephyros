@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{Manager, State};
 use wifi_rs::{prelude::*, WiFi};
+use tauri_plugin_dialog::DialogExt;
 
 // DS4 controller no longer needed, remove module reference
 
@@ -47,6 +48,28 @@ fn connect(state: State<'_, AppData>, ssid: String) -> Option<String> {
     None
 }
 
+#[tauri::command]
+async fn save_csv(app: tauri::AppHandle, csv_content: String, default_name: String) -> Result<String, String> {
+    use std::path::PathBuf;
+
+    // Open native save dialog
+    let file_path = app.dialog()
+        .file()
+        .set_file_name(&default_name)
+        .add_filter("CSV", &["csv"])
+        .blocking_save_file();
+
+    match file_path {
+        Some(path) => {
+            let path_buf: PathBuf = path.as_path().unwrap().to_path_buf();
+            std::fs::write(&path_buf, csv_content)
+                .map_err(|e| format!("Failed to write file: {}", e))?;
+            Ok(path_buf.display().to_string())
+        }
+        None => Ok("cancelled".to_string()),
+    }
+}
+
 
 #[derive(Clone, Debug)]
 struct AppData {
@@ -63,10 +86,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             scan,
             connect,
             get_url,
+            save_csv,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
