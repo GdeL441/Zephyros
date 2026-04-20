@@ -12,16 +12,44 @@ import struct
 
 # ── UART / DimmerLink setup ───────────────────────────────────────────────────
 uart = busio.UART(tx=board.GP4, rx=board.GP5, baudrate=115200)
-current_fan_speed = 0  # 0–100 %
 
-def dimmer_set_speed(percent: int):
+target_fan_speed = 0    # The speed we WANT (PID / WebSocket updates this)
+current_fan_speed = 0   # The speed currently sent to the web dashboard
+_last_sent_speed = -1   # The speed the DimmerLink actually currently has
+
+DIMMER_COOLDOWN_S = 0.05  # 20 Hz update limit
+
+def set_target_fan_speed(percent: int):
     """
-    Send a 4-byte SET command to DimmerLink over UART (115200 8N1).
-    Packet: 0x02 (start) | 0x53 (SET) | 0x00 (channel) | level (0-100)
+    Called by WebSocket (or future PID) to request a new speed.
+    Does NOT touch the UART directly.
     """
+    global target_fan_speed, current_fan_speed
     percent = max(0, min(100, int(percent)))
-    uart.write(bytes([0x02, 0x53, 0x00, percent]))
-    print(f"DimmerLink: set speed to {percent}%")
+    target_fan_speed = percent
+    current_fan_speed = percent  # Keep dashboard in sync with requested speed
+
+async def dimmer_updater():
+    """
+    Background task that safely syncs the target_fan_speed to the DimmerLink.
+    This guarantees we never flood the Dimmer UART, no matter how fast PID runs.
+    """
+    global _last_sent_speed
+    
+    while True:
+        if target_fan_speed != _last_sent_speed:
+            # Send the command
+            uart.write(bytes([0x02, 0x53, 0x00, target_fan_speed]))
+            
+            # Clear the RX buffer of the ACK byte (0x00)
+            if uart.in_waiting:
+                uart.read(uart.in_waiting)
+                
+            print(f"DimmerLink: updated hardware to {target_fan_speed}%")
+            _last_sent_speed = target_fan_speed
+            
+        # Wait before checking again (this enforces the maximum send rate)
+        await asyncio.sleep(DIMMER_COOLDOWN_S)
 
 # ── I2C & SDP810 setup ────────────────────────────────────────────────────────
 try:
@@ -188,7 +216,9 @@ async def handle_websocket_message(message):
         elif data.get('action') == 'set_fan_speed':
             speed = data.get('speed', current_fan_speed)
             current_fan_speed = speed
-            dimmer_set_speed(speed)
+            set_target_fan_speed(speed)
+        elif data.get('action') == "send_data":
+            await send_plotting_data()
         elif data.get('action') == 'new_settings':
             Kp = data.get('Kp', Kp)
             Ki = data.get('Ki', Ki)
@@ -269,6 +299,16 @@ async def send_current_settings():
         }
         await send_websocket_message(settings)
 
+async def send_plotting_data():
+    if current_websocket:
+        data = { 
+            "type": "plot_data",
+            "airspeed": smoothed_airspeed_ms,
+            "power": current_fan_speed,
+        }
+        await send_websocket_message(data)
+            
+
 async def measure_airspeed():
     """
     Continuously reads the SDP810 and updates smoothed_airspeed_ms.
@@ -313,6 +353,7 @@ async def main():
         handle_websockets(),
         measure_airspeed(),
         sensor_broadcaster(),
+        dimmer_updater(),
     )
 
 asyncio.run(main())

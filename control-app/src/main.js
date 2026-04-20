@@ -118,17 +118,14 @@ async function connectWs(url) {
       document.getElementById('voltage').innerText = fmtTel(data.voltage, 'V', 2);
       document.getElementById('resistance').innerText = fmtTel(data.resistance, 'Ω', 0);
       document.getElementById('power').innerText = fmtTel(data.power, 'mW', 2);
-
-      // Feed telemetry into the live graph when recording
-      if (window.liveGraph && window.liveGraph.isRecording) {
-        window.liveGraph.addTelemetryPoint(data);
-      }
     }
 
-    // Dedicated graph_data message: { type: "graph_data", x_label, y_label, series: { name: value, ... } }
-    if (data.type === "graph_data") {
-      if (window.liveGraph && window.liveGraph.isRecording) {
-        window.liveGraph.addGraphDataPoint(data);
+    // Scatter plot data from Pico: { type: "plot_data", airspeed: number, power: number }
+    if (data.type === "plot_data") {
+      if (window.liveGraph && window.liveGraph.isRecording && data.airspeed != null && data.power != null) {
+        const pitchSelect = document.getElementById('pitch-angle-select');
+        const pitch = pitchSelect ? Number(pitchSelect.value) : 0;
+        window.liveGraph.addScatterPoint(data.airspeed, data.power, pitch);
       }
     }
 
@@ -402,27 +399,18 @@ function persistInputs() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Live Graph Engine
+// Scatter Plot Engine — Power vs Airspeed, coloured by Pitch Angle
 // ══════════════════════════════════════════════════════════════════════════════
 
-const GRAPH_COLORS = [
-  '#4680ff', // blue
-  '#ff6b6b', // red
-  '#51cf66', // green
-  '#fcc419', // yellow
-  '#cc5de8', // purple
-  '#20c997', // teal
-  '#ff922b', // orange
-  '#748ffc', // indigo
-];
-
-// Map of known telemetry keys → friendly label + unit
-const TELEMETRY_FIELDS = {
-  voltage:   { label: 'Voltage',   unit: 'V' },
-  power:     { label: 'Power',     unit: 'mW' },
-  air_speed: { label: 'Airspeed',  unit: 'm/s' },
-  fan_speed: { label: 'Fan Speed', unit: '%' },
-  resistance:{ label: 'Resistance',unit: 'Ω' },
+// One colour per pitch-angle value (0°–30° in 5° steps)
+const PITCH_COLORS = {
+  0:  '#4680ff',   // blue
+  5:  '#51cf66',   // green
+  10: '#fcc419',   // yellow
+  15: '#ff922b',   // orange
+  20: '#ff6b6b',   // red
+  25: '#cc5de8',   // purple
+  30: '#20c997',   // teal
 };
 
 class LiveGraph {
@@ -431,23 +419,21 @@ class LiveGraph {
     this.ctx = this.canvas.getContext('2d');
     this.tooltip = null;
 
-    // Data state
-    this.series = {};          // { seriesName: { color, label, unit, points: [{x, y}] } }
-    this.seriesOrder = [];     // insertion-order of series names
-    this.hiddenSeries = new Set(); // series toggled off by the user
+    // Data state — flat array of { x, y, pitch }
+    this.points = [];
     this.isRecording = false;
-    this.startTime = 0;       // ms timestamp of first data point
-    this.xLabel = 'Time (s)';
-    this.yLabel = 'Value';
+    this.xLabel = 'Airspeed (m/s)';
+    this.yLabel = 'Power (mW)';
 
-    // Layout constants (in CSS pixels; canvas resolution uses DPR)
-    this.pad = { top: 18, right: 62, bottom: 56, left: 62 };
+    // Which pitch angles are currently hidden by the user
+    this.hiddenPitches = new Set();
 
-    // Animation frame ID
+    // Layout constants (CSS pixels)
+    this.pad = { top: 18, right: 20, bottom: 56, left: 62 };
+
     this._rafId = null;
-
-    // Hover state
     this._hoverX = null;
+    this._hoverY = null;
 
     this._initTooltip();
     this._bindResize();
@@ -490,86 +476,49 @@ class LiveGraph {
       const rect = this.canvas.getBoundingClientRect();
       this._hoverX = e.clientX - rect.left;
       this._hoverY = e.clientY - rect.top;
+      this._scheduleFrame();
     });
     this.canvas.addEventListener('mouseleave', () => {
       this._hoverX = null;
       this._hoverY = null;
       this.tooltip.classList.remove('visible');
+      this._scheduleFrame();
     });
   }
 
   // ── Data methods ────────────────────────────────────────────────
-  _getOrCreateSeries(name, label, unit) {
-    if (!this.series[name]) {
-      const colorIdx = this.seriesOrder.length % GRAPH_COLORS.length;
-      this.series[name] = {
-        color: GRAPH_COLORS[colorIdx],
-        label: label || name,
-        unit: unit || '',
-        points: [],
-      };
-      this.seriesOrder.push(name);
-      this._updateLegend();
-    }
-    return this.series[name];
-  }
 
-  /** Called when a telemetry message arrives while recording. */
-  addTelemetryPoint(data) {
+  /** Called when a scatter data point arrives while recording.
+   *  data = { target_airspeed: number, measured_power: number }
+   *  pitchAngle comes from the UI selector. */
+  addScatterPoint(airspeed, power, pitchAngle) {
     if (!this.isRecording) return;
-    const now = Date.now();
-    if (this.startTime === 0) this.startTime = now;
-    const t = (now - this.startTime) / 1000; // seconds
-
-    for (const key of Object.keys(TELEMETRY_FIELDS)) {
-      if (data[key] != null) {
-        const { label, unit } = TELEMETRY_FIELDS[key];
-        const s = this._getOrCreateSeries(key, label, unit);
-        s.points.push({ x: t, y: Number(data[key]) });
-      }
-    }
-
+    this.points.push({ x: Number(airspeed), y: Number(power), pitch: Number(pitchAngle) });
+    this._updateLegend();
     this._scheduleFrame();
   }
 
-  /** Called when a graph_data message arrives while recording.
-   *  Expected shape: { type:"graph_data", x_label?, y_label?, series: { name: value } } */
-  addGraphDataPoint(data) {
-    if (!this.isRecording) return;
-    const now = Date.now();
-    if (this.startTime === 0) this.startTime = now;
-    const t = (now - this.startTime) / 1000;
-
-    if (data.x_label) this.xLabel = data.x_label;
-    if (data.y_label) this.yLabel = data.y_label;
-
-    if (data.series && typeof data.series === 'object') {
-      for (const [name, value] of Object.entries(data.series)) {
-        const s = this._getOrCreateSeries(name, name, '');
-        s.points.push({ x: t, y: Number(value) });
-      }
-    }
-
-    this._scheduleFrame();
-  }
-
-  // ── Legend (clickable to toggle visibility) ────────────────────
+  // ── Legend (clickable to toggle pitch visibility) ──────────────
   _updateLegend() {
     const container = document.getElementById('graph-legend');
     if (!container) return;
     container.innerHTML = '';
-    for (const name of this.seriesOrder) {
-      const s = this.series[name];
-      const hidden = this.hiddenSeries.has(name);
+
+    // Collect unique pitch angles present in data, sorted
+    const pitches = [...new Set(this.points.map(p => p.pitch))].sort((a, b) => a - b);
+
+    for (const pitch of pitches) {
+      const hidden = this.hiddenPitches.has(pitch);
+      const color = PITCH_COLORS[pitch] || '#888';
       const chip = document.createElement('span');
       chip.className = 'graph-legend-chip' + (hidden ? ' disabled' : '');
-      chip.innerHTML = `<span class="graph-legend-swatch" style="background:${hidden ? '#ccc' : s.color}"></span>${s.label}${s.unit ? ' (' + s.unit + ')' : ''}`;
+      chip.innerHTML = `<span class="graph-legend-swatch" style="background:${hidden ? '#ccc' : color}"></span>${pitch}°`;
       chip.style.cursor = 'pointer';
       chip.addEventListener('click', () => {
-        if (this.hiddenSeries.has(name)) {
-          this.hiddenSeries.delete(name);
+        if (this.hiddenPitches.has(pitch)) {
+          this.hiddenPitches.delete(pitch);
         } else {
-          this.hiddenSeries.add(name);
+          this.hiddenPitches.add(pitch);
         }
         this._updateLegend();
         this._scheduleFrame();
@@ -594,12 +543,8 @@ class LiveGraph {
   }
 
   clear() {
-    this.series = {};
-    this.seriesOrder = [];
-    this.hiddenSeries.clear();
-    this.startTime = 0;
-    this.xLabel = 'Time (s)';
-    this.yLabel = 'Value';
+    this.points = [];
+    this.hiddenPitches.clear();
     this._updateLegend();
     document.getElementById('graph-no-data')?.classList.remove('hidden');
     this._drawEmpty();
@@ -607,54 +552,23 @@ class LiveGraph {
 
   // ── CSV Export ──────────────────────────────────────────────────
   async exportCSV() {
-    if (this.seriesOrder.length === 0) return;
+    if (this.points.length === 0) return;
 
-    // Collect all unique x values across every series, sorted
-    const xSet = new Set();
-    for (const name of this.seriesOrder) {
-      for (const p of this.series[name].points) xSet.add(p.x);
-    }
-    const xValues = [...xSet].sort((a, b) => a - b);
-
-    // Build lookup maps for each series: x → y
-    const maps = {};
-    for (const name of this.seriesOrder) {
-      maps[name] = new Map(this.series[name].points.map(p => [p.x, p.y]));
-    }
-
-    // Header
-    const header = ['Time (s)', ...this.seriesOrder.map(k => {
-      const s = this.series[k];
-      return s.label + (s.unit ? ` (${s.unit})` : '');
-    })];
-
-    // Rows
-    const rows = xValues.map(x => {
-      const cells = [x.toFixed(3)];
-      for (const name of this.seriesOrder) {
-        const v = maps[name].get(x);
-        cells.push(v != null ? v.toString() : '');
-      }
-      return cells.join(',');
-    });
-
+    const header = ['Airspeed (m/s)', 'Power (mW)', 'Pitch Angle (°)'];
+    const rows = this.points.map(p => `${p.x},${p.y},${p.pitch}`);
     const csv = [header.join(','), ...rows].join('\n');
 
-    // Build default filename: WindTunnelGraph_2026-04-18_14-30-52.csv
     const now = new Date();
     const pad2 = (n) => String(n).padStart(2, '0');
-    const defaultName = `WindTunnelGraph_${now.getFullYear()}-${pad2(now.getMonth()+1)}-${pad2(now.getDate())}_${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}.csv`;
+    const defaultName = `PowerVsAirspeed_${now.getFullYear()}-${pad2(now.getMonth()+1)}-${pad2(now.getDate())}_${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}.csv`;
 
     try {
-      // Open native macOS save dialog
-      const filePath = await window.__TAURI__.dialog.save({
-        defaultPath: defaultName,
-        filters: [{ name: 'CSV', extensions: ['csv'] }],
+      const result = await window.__TAURI__.core.invoke('save_csv', {
+        csvContent: csv,
+        defaultName: defaultName,
       });
-
-      if (filePath) {
-        await window.__TAURI__.fs.writeTextFile(filePath, csv);
-        console.log('CSV saved to', filePath);
+      if (result && result !== 'cancelled') {
+        console.log('CSV saved to', result);
       }
     } catch (err) {
       console.error('CSV export failed:', err);
@@ -683,62 +597,37 @@ class LiveGraph {
     const plotH = h - pad.top - pad.bottom;
     if (plotW <= 0 || plotH <= 0) return;
 
-    // ── Visible series only ──────────────────────────────────────
-    const visibleNames = this.seriesOrder.filter(n => !this.hiddenSeries.has(n));
+    // Filter visible points
+    const visible = this.points.filter(p => !this.hiddenPitches.has(p.pitch));
 
-    // Global X bounds (across all visible series)
-    let xMin = Infinity, xMax = -Infinity;
-    for (const name of visibleNames) {
-      for (const p of this.series[name].points) {
-        if (p.x < xMin) xMin = p.x;
-        if (p.x > xMax) xMax = p.x;
-      }
+    // Compute bounds
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    for (const p of visible) {
+      if (p.x < xMin) xMin = p.x;
+      if (p.x > xMax) xMax = p.x;
+      if (p.y < yMin) yMin = p.y;
+      if (p.y > yMax) yMax = p.y;
     }
 
     if (!isFinite(xMin)) {
-      // No visible data — keep animation loop alive if recording
+      // No visible data
       if (this.isRecording) {
         this._rafId = requestAnimationFrame(() => { this._rafId = null; this._draw(); });
       }
       return;
     }
+
+    // Add padding to bounds
     if (xMax === xMin) { xMin -= 0.5; xMax += 0.5; }
-
-    // ── Split visible series into left / right Y-axis groups ────
-    const { leftNames, rightNames } = this._splitAxes(visibleNames);
-    const hasDualAxes = rightNames.length > 0;
-
-    // Compute Y-bounds per group
-    const yBounds = (names) => {
-      let lo = Infinity, hi = -Infinity;
-      for (const n of names) {
-        for (const p of this.series[n].points) {
-          if (p.y < lo) lo = p.y;
-          if (p.y > hi) hi = p.y;
-        }
-      }
-      const range = hi - lo || 1;
-      lo -= range * 0.08;
-      hi += range * 0.08;
-      return { lo, hi };
-    };
-
-    const leftBounds  = leftNames.length  > 0 ? yBounds(leftNames)  : null;
-    const rightBounds = rightNames.length > 0 ? yBounds(rightNames) : null;
-
-    // Build a map: seriesName → 'left' | 'right'
-    const axisOf = {};
-    for (const n of leftNames)  axisOf[n] = 'left';
-    for (const n of rightNames) axisOf[n] = 'right';
+    if (yMax === yMin) { yMin -= 0.5; yMax += 0.5; }
+    const xRange = xMax - xMin;
+    const yRange = yMax - yMin;
+    xMin -= xRange * 0.06; xMax += xRange * 0.06;
+    yMin -= yRange * 0.08; yMax += yRange * 0.08;
 
     // Mapping helpers
     const mapX = (v) => pad.left + ((v - xMin) / (xMax - xMin)) * plotW;
-    const makeMapY = (bounds) => bounds
-      ? (v) => pad.top + plotH - ((v - bounds.lo) / (bounds.hi - bounds.lo)) * plotH
-      : null;
-    const mapYL = makeMapY(leftBounds);
-    const mapYR = makeMapY(rightBounds);
-    const getMapY = (name) => axisOf[name] === 'right' ? mapYR : mapYL;
+    const mapY = (v) => pad.top + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
 
     // ── Grid + axes ──────────────────────────────────────────────
     ctx.save();
@@ -746,69 +635,32 @@ class LiveGraph {
     const FONT_LABEL = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     const LABEL_COLOR = '#8a92a3';
 
-    // ── Left Y-axis ticks ────────────────────────────────────────
-    if (leftBounds) {
-      const ticks = this._niceTicks(leftBounds.lo, leftBounds.hi, 5);
-      // Determine left-axis color (single series → that color, else grey)
-      const leftColor = leftNames.length === 1 ? this.series[leftNames[0]].color : LABEL_COLOR;
-      ctx.strokeStyle = '#e9ecef';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      ctx.font = FONT_TICK;
-      ctx.fillStyle = leftColor;
-      for (const v of ticks) {
-        const y = Math.round(mapYL(v)) + 0.5;
-        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
-        ctx.fillText(this._fmtTickValue(v), pad.left - 6, y);
-      }
-      // Left axis label (rotated)
-      const leftUnits = [...new Set(leftNames.map(n => this.series[n].unit).filter(Boolean))];
-      const leftLabel = leftUnits.join(' / ') || 'Value';
-      ctx.font = FONT_LABEL;
-      ctx.fillStyle = leftColor;
-      ctx.save();
-      ctx.translate(12, pad.top + plotH / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.textAlign = 'center';
-      ctx.fillText(leftLabel, 0, 0);
-      ctx.restore();
-    }
-
-    // ── Right Y-axis ticks (only when dual axes) ─────────────────
-    if (rightBounds) {
-      const ticks = this._niceTicks(rightBounds.lo, rightBounds.hi, 5);
-      const rightColor = rightNames.length === 1 ? this.series[rightNames[0]].color : LABEL_COLOR;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.font = FONT_TICK;
-      ctx.fillStyle = rightColor;
-      ctx.strokeStyle = '#e9ecef';
-      ctx.setLineDash([4, 4]);
-      for (const v of ticks) {
-        const y = Math.round(mapYR(v)) + 0.5;
-        // Don't re-draw grid lines, just tick labels on the right
-        ctx.fillText(this._fmtTickValue(v), w - pad.right + 6, y);
-      }
-      // Right axis label (rotated)
-      const rightUnits = [...new Set(rightNames.map(n => this.series[n].unit).filter(Boolean))];
-      const rightLabel = rightUnits.join(' / ') || 'Value';
-      ctx.font = FONT_LABEL;
-      ctx.fillStyle = rightColor;
-      ctx.save();
-      ctx.translate(w - 10, pad.top + plotH / 2);
-      ctx.rotate(Math.PI / 2);
-      ctx.textAlign = 'center';
-      ctx.fillText(rightLabel, 0, 0);
-      ctx.restore();
-    }
-    ctx.setLineDash([]);
-
-    // ── X-axis ticks ─────────────────────────────────────────────
+    // Y-axis ticks
+    const yTicks = this._niceTicks(yMin, yMax, 5);
     ctx.strokeStyle = '#e9ecef';
-    ctx.setLineDash([4, 4]);
     ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_TICK;
+    ctx.fillStyle = LABEL_COLOR;
+    for (const v of yTicks) {
+      const y = Math.round(mapY(v)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+      ctx.fillText(this._fmtTickValue(v), pad.left - 6, y);
+    }
+
+    // Y-axis label (rotated)
+    ctx.font = FONT_LABEL;
+    ctx.fillStyle = LABEL_COLOR;
+    ctx.save();
+    ctx.translate(12, pad.top + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText(this.yLabel, 0, 0);
+    ctx.restore();
+
+    // X-axis ticks
     const xTicks = this._niceTicks(xMin, xMax, 6);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
@@ -821,7 +673,7 @@ class LiveGraph {
     }
     ctx.setLineDash([]);
 
-    // X axis label
+    // X-axis label
     ctx.font = FONT_LABEL;
     ctx.fillStyle = LABEL_COLOR;
     ctx.textAlign = 'center';
@@ -832,101 +684,82 @@ class LiveGraph {
     ctx.lineWidth = 1;
     ctx.strokeRect(pad.left, pad.top, plotW, plotH);
 
-    // ── Draw series ──────────────────────────────────────────────
+    // ── Draw scatter dots ────────────────────────────────────────
     ctx.save();
     ctx.beginPath();
     ctx.rect(pad.left, pad.top, plotW, plotH);
     ctx.clip();
 
-    for (const name of visibleNames) {
-      const s = this.series[name];
-      if (s.points.length === 0) continue;
-      const myMapY = getMapY(name);
+    for (const p of visible) {
+      const px = mapX(p.x);
+      const py = mapY(p.y);
+      const color = PITCH_COLORS[p.pitch] || '#888';
 
-      // Line
-      ctx.strokeStyle = s.color;
-      ctx.lineWidth = 2;
-      ctx.lineJoin = 'round';
+      // Filled dot with subtle border
+      ctx.fillStyle = color;
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      for (let i = 0; i < s.points.length; i++) {
-        const px = mapX(s.points[i].x);
-        const py = myMapY(s.points[i].y);
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      }
+      ctx.arc(px, py, 5, 0, Math.PI * 2);
+      ctx.fill();
       ctx.stroke();
-
-      // Data points (small dots)
-      ctx.fillStyle = s.color;
-      for (const p of s.points) {
-        const px = mapX(p.x);
-        const py = myMapY(p.y);
-        ctx.beginPath();
-        ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      }
     }
+
     ctx.restore(); // clip
     ctx.restore(); // global save
 
-    // ── Hover crosshair + tooltip ────────────────────────────────
-    if (this._hoverX != null && this._hoverX >= pad.left && this._hoverX <= w - pad.right) {
-      const dataX = xMin + ((this._hoverX - pad.left) / plotW) * (xMax - xMin);
+    // ── Hover tooltip (nearest point) ────────────────────────────
+    if (this._hoverX != null && this._hoverX >= pad.left && this._hoverX <= w - pad.right &&
+        this._hoverY != null && this._hoverY >= pad.top && this._hoverY <= h - pad.bottom) {
 
-      // Draw vertical crosshair
-      ctx.save();
-      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.moveTo(this._hoverX, pad.top);
-      ctx.lineTo(this._hoverX, h - pad.bottom);
-      ctx.stroke();
-      ctx.restore();
-
-      // Build tooltip content → find closest point in each visible series
-      let tooltipParts = [`<strong>${this._fmtTickValue(dataX)} s</strong>`];
-      for (const name of visibleNames) {
-        const s = this.series[name];
-        const closest = this._closestPoint(s.points, dataX);
-        if (closest) {
-          const side = hasDualAxes ? (axisOf[name] === 'right' ? ' ▸' : ' ◂') : '';
-          tooltipParts.push(
-            `<span style="color:${s.color}">${s.label}:</span> ${this._fmtTickValue(closest.y)}${s.unit ? ' ' + s.unit : ''}${side}`
-          );
-
-          // Highlight dot
-          const myMapY = getMapY(name);
-          const px = mapX(closest.x);
-          const py = myMapY(closest.y);
-          ctx.fillStyle = s.color;
-          ctx.beginPath();
-          ctx.arc(px, py, 4.5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.strokeStyle = '#fff';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        }
+      // Find nearest visible point to cursor
+      let best = null, bestDist = Infinity;
+      for (const p of visible) {
+        const px = mapX(p.x);
+        const py = mapY(p.y);
+        const d = Math.hypot(px - this._hoverX, py - this._hoverY);
+        if (d < bestDist) { bestDist = d; best = p; }
       }
 
-      this.tooltip.innerHTML = tooltipParts.join('<br>');
-      this.tooltip.classList.add('visible');
+      if (best && bestDist < 30) {
+        const px = mapX(best.x);
+        const py = mapY(best.y);
+        const color = PITCH_COLORS[best.pitch] || '#888';
 
-      // Position tooltip
-      const ttW = this.tooltip.offsetWidth;
-      const ttH = this.tooltip.offsetHeight;
-      let tx = this._hoverX + 14;
-      let ty = (this._hoverY || pad.top) - ttH / 2;
-      if (tx + ttW > w - 4) tx = this._hoverX - ttW - 14;
-      if (ty < 4) ty = 4;
-      if (ty + ttH > h - 4) ty = h - ttH - 4;
-      this.tooltip.style.left = tx + 'px';
-      this.tooltip.style.top = ty + 'px';
+        // Highlight ring
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(px, py, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Tooltip
+        this.tooltip.innerHTML = [
+          `<strong style="color:${color}">${best.pitch}° pitch</strong>`,
+          `Airspeed: ${this._fmtTickValue(best.x)} m/s`,
+          `Power: ${this._fmtTickValue(best.y)} mW`,
+        ].join('<br>');
+        this.tooltip.classList.add('visible');
+
+        const ttW = this.tooltip.offsetWidth;
+        const ttH = this.tooltip.offsetHeight;
+        let tx = px + 14;
+        let ty = py - ttH / 2;
+        if (tx + ttW > w - 4) tx = px - ttW - 14;
+        if (ty < 4) ty = 4;
+        if (ty + ttH > h - 4) ty = h - ttH - 4;
+        this.tooltip.style.left = tx + 'px';
+        this.tooltip.style.top = ty + 'px';
+      } else {
+        this.tooltip.classList.remove('visible');
+      }
     } else {
       this.tooltip.classList.remove('visible');
     }
 
-    // Keep drawing while recording (animation loop)
+    // Keep drawing while recording
     if (this.isRecording) {
       this._rafId = requestAnimationFrame(() => {
         this._rafId = null;
@@ -935,57 +768,7 @@ class LiveGraph {
     }
   }
 
-  // ── Dual Y-axis splitting ─────────────────────────────────────
-  // Groups visible series by magnitude: if the largest series' max
-  // is >5× the smallest, split at the biggest gap (log scale).
-  _splitAxes(visibleNames) {
-    if (visibleNames.length < 2) return { leftNames: visibleNames, rightNames: [] };
-
-    // Peak absolute value per series
-    const peak = {};
-    for (const n of visibleNames) {
-      let mx = 0;
-      for (const p of this.series[n].points) {
-        const a = Math.abs(p.y);
-        if (a > mx) mx = a;
-      }
-      peak[n] = mx || 1;
-    }
-
-    const sorted = [...visibleNames].sort((a, b) => peak[a] - peak[b]);
-    const lo = peak[sorted[0]];
-    const hi = peak[sorted[sorted.length - 1]];
-
-    // Only split if the range spans more than 5×
-    if (hi / Math.max(lo, 1e-9) <= 5) {
-      return { leftNames: sorted, rightNames: [] };
-    }
-
-    // Find the largest ratio gap between consecutive sorted maxes
-    let bestGap = 0, bestIdx = 0;
-    for (let i = 0; i < sorted.length - 1; i++) {
-      const ratio = peak[sorted[i + 1]] / Math.max(peak[sorted[i]], 1e-9);
-      if (ratio > bestGap) { bestGap = ratio; bestIdx = i; }
-    }
-
-    return {
-      leftNames:  sorted.slice(0, bestIdx + 1),
-      rightNames: sorted.slice(bestIdx + 1),
-    };
-  }
-
   // ── Utilities ──────────────────────────────────────────────────
-  _closestPoint(points, targetX) {
-    if (points.length === 0) return null;
-    let best = points[0];
-    let bestDist = Math.abs(points[0].x - targetX);
-    for (let i = 1; i < points.length; i++) {
-      const d = Math.abs(points[i].x - targetX);
-      if (d < bestDist) { best = points[i]; bestDist = d; }
-    }
-    return best;
-  }
-
   _niceTicks(min, max, targetCount) {
     const range = max - min;
     if (range === 0) return [min];
@@ -1018,11 +801,12 @@ function initLiveGraph() {
   const toggleText = document.getElementById('graph-toggle-text');
   const clearBtn = document.getElementById('graph-clear-btn');
   const exportBtn = document.getElementById('graph-export-btn');
+  const sendDataBtn = document.getElementById('graph-send-data-btn');
+  const pitchSelect = document.getElementById('pitch-angle-select');
 
   toggleBtn?.addEventListener('click', () => {
     const active = toggleBtn.getAttribute('data-graphing') === 'true';
     if (!active) {
-      // Start graphing
       graph.start();
       toggleBtn.setAttribute('data-graphing', 'true');
       toggleBtn.classList.remove('btn-success');
@@ -1030,10 +814,8 @@ function initLiveGraph() {
       toggleText.textContent = 'Stop Graphing';
       toggleBtn.querySelector('i').className = 'ti ti-player-stop me-1';
 
-      // Send WS start_graphing message
       if (ws) ws.send(JSON.stringify({ action: 'start_graphing' }));
     } else {
-      // Stop graphing
       graph.stop();
       toggleBtn.setAttribute('data-graphing', 'false');
       toggleBtn.classList.remove('btn-danger');
@@ -1041,9 +823,13 @@ function initLiveGraph() {
       toggleText.textContent = 'Start Graphing';
       toggleBtn.querySelector('i').className = 'ti ti-player-play me-1';
 
-      // Send WS stop_graphing message
       if (ws) ws.send(JSON.stringify({ action: 'stop_graphing' }));
     }
+  });
+
+  sendDataBtn?.addEventListener('click', () => {
+    if (!ws) return;
+    ws.send(JSON.stringify({ action: 'send_data' }));
   });
 
   clearBtn?.addEventListener('click', () => {
@@ -1054,3 +840,4 @@ function initLiveGraph() {
     graph.exportCSV();
   });
 }
+
