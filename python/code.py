@@ -10,50 +10,218 @@ import math
 import busio
 import struct
 
-# ── UART / DimmerLink setup ───────────────────────────────────────────────────
-uart = busio.UART(tx=board.GP4, rx=board.GP5, baudrate=115200)
+# ── UART / DimmerLink ─────────────────────────────────────────────────────────
+_UART_TX_PIN = board.GP12
+_UART_RX_PIN = board.GP13
+_UART_BAUDRATE = 115200
+_UART_TIMEOUT_S = 0.1
+uart = busio.UART(tx=_UART_TX_PIN, rx=_UART_RX_PIN, baudrate=_UART_BAUDRATE, timeout=_UART_TIMEOUT_S)
 
-target_fan_speed = 0    # The speed we WANT (PID / WebSocket updates this)
-current_fan_speed = 0   # The speed currently sent to the web dashboard
-_last_sent_speed = -1   # The speed the DimmerLink actually currently has
+target_fan_speed  = 0
+current_fan_speed = 0
+_last_sent_speed  = 0
+_uart_busy        = False
+_speed_event      = asyncio.Event()
+_UART_ACK_OK      = 0x00
+_UART_MIN_TX_GAP_S = 0.120
+_DIMMER_POLL_INTERVAL_S = 2.0
+_SPEED_SETTLE_WINDOW_S = 0.120
+_last_uart_tx_s = 0.0
+_last_percent_poll_s = 0.0
+_last_known_dimmer_percent = 0
+_last_target_update_s = 0.0
+_consecutive_write_failures = 0
 
-DIMMER_COOLDOWN_S = 0.05  # 20 Hz update limit
 
-def set_target_fan_speed(percent: int):
-    """
-    Called by WebSocket (or future PID) to request a new speed.
-    Does NOT touch the UART directly.
-    """
-    global target_fan_speed, current_fan_speed
+def set_target_fan_speed(percent: int) -> None:
+    global target_fan_speed, current_fan_speed, _last_target_update_s
     percent = max(0, min(100, int(percent)))
-    target_fan_speed = percent
-    current_fan_speed = percent  # Keep dashboard in sync with requested speed
+    if percent == target_fan_speed:
+        return
+    target_fan_speed  = percent
+    current_fan_speed = percent
+    _last_target_update_s = time.monotonic()
+    _speed_event.set()
 
-async def dimmer_updater():
+
+async def _uart_recover():
+    """Silence + drain — call after any failed transaction."""
+    await asyncio.sleep(0.5)          # let dimmer finish whatever it was saying
+    uart.reset_input_buffer()         # discard any mis-aligned response bytes
+
+
+def _uart_reinit():
+    """Recreate UART object if the bus/protocol stack wedges."""
+    global uart
+    try:
+        uart.deinit()
+    except Exception:
+        pass
+    time.sleep(0.050)
+    uart = busio.UART(
+        tx=_UART_TX_PIN,
+        rx=_UART_RX_PIN,
+        baudrate=_UART_BAUDRATE,
+        timeout=_UART_TIMEOUT_S,
+    )
+
+
+async def _uart_wait_tx_slot():
+    """Guarantee a minimum silence gap between UART commands."""
+    global _last_uart_tx_s
+    now = time.monotonic()
+    wait_s = _UART_MIN_TX_GAP_S - (now - _last_uart_tx_s)
+    if wait_s > 0:
+        await asyncio.sleep(wait_s)
+    _last_uart_tx_s = time.monotonic()
+
+
+async def _read_dimmer_frame(wait_s: float = 0.050):
+    """Read one full DimmerLink response frame after a command."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if uart.in_waiting:
+            await asyncio.sleep(0.005)
+            frame = uart.read(uart.in_waiting)
+            if frame:
+                return frame
+        await asyncio.sleep(0.002)
+    return None
+
+
+async def _dimmer_reset() -> bool:
     """
-    Background task that safely syncs the target_fan_speed to the DimmerLink.
-    This guarantees we never flood the Dimmer UART, no matter how fast PID runs.
+    Request a DimmerLink protocol reset (0x02 0x58).
+    Best effort: some firmware revisions ACK it, others stay silent.
     """
-    global _last_sent_speed
-    
+    await _uart_wait_tx_slot()
+    uart.reset_input_buffer()
+    uart.write(bytes([0x02, 0x58]))
+    frame = await _read_dimmer_frame(wait_s=0.080)
+    status = frame[0] if frame else None
+
+    if status is None:
+        print("DimmerLink: reset sent (no ACK)")
+        return True
+    if status == _UART_ACK_OK:
+        print("DimmerLink: reset ACK")
+        return True
+
+    print(f"DimmerLink: reset ERR 0x{status:02X}")
+    return False
+
+
+async def _dimmer_write(speed: int) -> bool:
+    """One attempt: flush → send → wait → check ACK. Caller holds _uart_busy."""
+    await _uart_wait_tx_slot()
+    uart.reset_input_buffer()
+    uart.write(bytes([0x02, 0x53, 0x00, speed]))
+    frame = await _read_dimmer_frame(wait_s=0.140)
+    status = frame[0] if frame else None
+
+    if status == _UART_ACK_OK:
+        return True
+    if status is None:
+        print("DimmerLink: no ACK")
+        return False
+
+    print(f"DimmerLink ERR: 0x{status:02X}")
+    return False
+
+
+async def dimmer_updater() -> None:
+    global _last_sent_speed, _uart_busy, _last_known_dimmer_percent, _consecutive_write_failures
+
+    await asyncio.sleep(0.3)
+    uart.reset_input_buffer()
+
     while True:
-        if target_fan_speed != _last_sent_speed:
-            # Send the command
-            uart.write(bytes([0x02, 0x53, 0x00, target_fan_speed]))
-            
-            # Clear the RX buffer of the ACK byte (0x00)
-            if uart.in_waiting:
-                uart.read(uart.in_waiting)
-                
-            print(f"DimmerLink: updated hardware to {target_fan_speed}%")
-            _last_sent_speed = target_fan_speed
-            
-        # Wait before checking again (this enforces the maximum send rate)
-        await asyncio.sleep(DIMMER_COOLDOWN_S)
+        if target_fan_speed == _last_sent_speed:
+            _speed_event.clear()
+            await _speed_event.wait()
+
+        # Coalesce slider bursts: wait for input to settle, then send only latest.
+        while (time.monotonic() - _last_target_update_s) < _SPEED_SETTLE_WINDOW_S:
+            await asyncio.sleep(0.01)
+        speed = target_fan_speed
+
+        while _uart_busy:
+            await asyncio.sleep(0.01)
+        _uart_busy = True
+        try:
+            sent = await _dimmer_write(speed)
+        finally:
+            _uart_busy = False
+
+        if sent:
+            _consecutive_write_failures = 0
+            _last_sent_speed = speed
+            _last_known_dimmer_percent = speed
+            print(f"DimmerLink: {speed}% OK")
+        else:
+            # If command channel is wedged, issue protocol reset before retry.
+            print(f"DimmerLink: retrying {speed}% after recovery/reset...")
+            await _uart_recover()
+            await _dimmer_reset()
+            await asyncio.sleep(0.120)
+
+            while _uart_busy:
+                await asyncio.sleep(0.01)
+            _uart_busy = True
+            try:
+                sent = await _dimmer_write(speed)
+            finally:
+                _uart_busy = False
+
+            if sent:
+                _consecutive_write_failures = 0
+                _last_sent_speed = speed
+                _last_known_dimmer_percent = speed
+                print(f"DimmerLink: {speed}% OK (retry)")
+            else:
+                _consecutive_write_failures += 1
+                print(f"DimmerLink: gave up on {speed}%")
+                _last_sent_speed = speed   # stop looping on this value
+                await _uart_recover()      # recover before accepting next command
+
+                # Hard recovery if we fail repeatedly: reinitialize UART + reset protocol.
+                if _consecutive_write_failures >= 2:
+                    print("DimmerLink: hard recovery (UART reinit + reset)")
+                    _uart_reinit()
+                    await asyncio.sleep(0.150)
+                    await _dimmer_reset()
+                    await _uart_recover()
+
+
+async def get_dimmer_percent():
+    global _uart_busy, _last_percent_poll_s, _last_known_dimmer_percent
+    now = time.monotonic()
+
+    # Avoid extra UART traffic while a new speed is pending or after a recent poll.
+    if target_fan_speed != _last_sent_speed:
+        return _last_known_dimmer_percent
+    if (now - _last_percent_poll_s) < _DIMMER_POLL_INTERVAL_S:
+        return _last_known_dimmer_percent
+
+    while _uart_busy:
+        await asyncio.sleep(0.01)
+    _uart_busy = True
+    try:
+        await _uart_wait_tx_slot()
+        uart.reset_input_buffer()
+        uart.write(bytes([0x02, 0x47, 0x00]))
+        frame = await _read_dimmer_frame(wait_s=0.120)
+        if frame and frame[0] == _UART_ACK_OK and len(frame) >= 2:
+            _last_known_dimmer_percent = frame[1]
+            _last_percent_poll_s = time.monotonic()
+            return _last_known_dimmer_percent
+    finally:
+        _uart_busy = False
+    return _last_known_dimmer_percent
 
 # ── I2C & SDP810 setup ────────────────────────────────────────────────────────
 try:
-    i2c = busio.I2C(scl=board.GP1, sda=board.GP0, frequency=100_000)
+    i2c = busio.I2C(scl=board.GP27, sda=board.GP26, frequency=100_000)
 except RuntimeError as e:
     print(f"I2C init failed: {e}")
     i2c = None
@@ -281,11 +449,11 @@ async def sensor_broadcaster():
                 "resistance": 10000,
                 "power":      10,
                 "air_speed":  smoothed_airspeed_ms,
-                "fan_speed":  current_fan_speed,
+                "fan_speed":  await get_dimmer_percent(),
                 "uptime":     time.monotonic(),
             }
             await send_websocket_message(telemetry)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.1)
 
 async def send_current_settings():
     if current_websocket:

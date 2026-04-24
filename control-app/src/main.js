@@ -40,7 +40,7 @@ fanSpeedSlider.addEventListener('input', () => {
 
 fanSpeedSlider.addEventListener('change', () => {
   if (!ws) return;
-  ws.send(JSON.stringify({ action: 'set_fan_speed', speed: Number(fanSpeedSlider.value) }));
+  ws.send(JSON.stringify({ action: 'set_fan_speed', speed: parseInt(fanSpeedSlider.value, 10) }));
 });
 
 fanSpeedValueEl.addEventListener('keydown', (e) => {
@@ -51,16 +51,16 @@ fanSpeedValueEl.addEventListener('keydown', (e) => {
 });
 
 fanSpeedValueEl.addEventListener('blur', () => {
-  let val = parseInt(fanSpeedValueEl.textContent);
+  let val = parseInt(fanSpeedValueEl.textContent, 10);
   if (isNaN(val)) {
-    val = Number(fanSpeedSlider.value);
+    val = parseInt(fanSpeedSlider.value, 10);
   } else {
-    val = Math.max(0, Math.min(100, val));
+    val = Math.max(0, Math.min(100, Math.round(val)));
   }
   
   fanSpeedValueEl.textContent = val;
   
-  if (Number(fanSpeedSlider.value) !== val) {
+  if (parseInt(fanSpeedSlider.value, 10) !== val) {
     fanSpeedSlider.value = val;
     updateSliderBackground();
     
