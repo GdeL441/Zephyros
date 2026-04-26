@@ -6,217 +6,182 @@ from adafruit_httpserver import Server, Request, Response, Websocket, GET
 import asyncio
 import board
 import digitalio
+import analogio
 import math
 import busio
 import struct
+import errno  # Added for precise I2C error parsing
 
-# ── UART / DimmerLink ─────────────────────────────────────────────────────────
-_UART_TX_PIN = board.GP12
-_UART_RX_PIN = board.GP13
-_UART_BAUDRATE = 115200
-_UART_TIMEOUT_S = 0.1
-uart = busio.UART(tx=_UART_TX_PIN, rx=_UART_RX_PIN, baudrate=_UART_BAUDRATE, timeout=_UART_TIMEOUT_S)
+# ── I2C / DimmerLink ──────────────────────────────────────────────────────────
+_DIMMER_SDA_PIN = board.GP12
+_DIMMER_SCL_PIN = board.GP13
+_DIMMER_ADDR    = 0x50
 
-target_fan_speed  = 0
-current_fan_speed = 0
-_last_sent_speed  = 0
-_uart_busy        = False
-_speed_event      = asyncio.Event()
-_UART_ACK_OK      = 0x00
-_UART_MIN_TX_GAP_S = 0.120
-_DIMMER_POLL_INTERVAL_S = 2.0
-_SPEED_SETTLE_WINDOW_S = 0.120
-_last_uart_tx_s = 0.0
-_last_percent_poll_s = 0.0
-_last_known_dimmer_percent = 0
-_last_target_update_s = 0.0
+_REG_STATUS  = 0x00
+_REG_COMMAND = 0x01
+_REG_ERROR   = 0x02
+_REG_LEVEL   = 0x10
+_REG_CURVE   = 0x11
+_REG_FREQ    = 0x20
+
+_DIMMER_READ_INTERVAL_S = 0.1
+_DIMMER_MAX_FAILURES    = 3
+_I2C_LOCK_TIMEOUT       = 50
+
+# Helper to decode opaque CircuitPython OSErrors
+def _decode_i2c_error(e: OSError) -> str:
+    if hasattr(e, 'errno'):
+        if e.errno == 19: return "ENODEV (19) - No device. Check power, address, or physical connection."
+        if e.errno == 5:  return "EIO (5) - Bus error. Usually electrical noise or NACK mid-transmission."
+        if e.errno == 116: return "ETIMEDOUT (116) - Bus hung. Missing pull-up resistors or slave is clock-stretching infinitely."
+    return str(e)
+
+def _dimmer_i2c_init() -> busio.I2C | None:
+    try:
+        # Reduced frequency from 100k to 50k. Custom/ATtiny slaves often
+        # struggle with 100kHz while servicing zero-cross interrupts.
+        bus = busio.I2C(scl=_DIMMER_SCL_PIN, sda=_DIMMER_SDA_PIN, frequency=50_000)
+        print("DimmerLink I2C initialised")
+        return bus
+    except RuntimeError as e:
+        print(f"DimmerLink I2C init failed: {e}")
+        return None
+
+dimmer_i2c = _dimmer_i2c_init()
+
+# ── DimmerLink state ──────────────────────────────────────────────────────────
+target_fan_speed            = 0
+current_fan_speed           = 0
+_last_sent_speed            = 0
+_last_percent_poll_s        = 0.0
+_last_known_dimmer_percent  = 0
 _consecutive_write_failures = 0
-
+_speed_event                = asyncio.Event()
 
 def set_target_fan_speed(percent: int) -> None:
-    global target_fan_speed, current_fan_speed, _last_target_update_s
+    global target_fan_speed, current_fan_speed
     percent = max(0, min(100, int(percent)))
-    if percent == target_fan_speed:
-        return
-    target_fan_speed  = percent
-    current_fan_speed = percent
-    _last_target_update_s = time.monotonic()
+    target_fan_speed      = percent
+    current_fan_speed     = percent
     _speed_event.set()
 
+# ── DimmerLink I2C helpers ────────────────────────────────────────────────────
 
-async def _uart_recover():
-    """Silence + drain — call after any failed transaction."""
-    await asyncio.sleep(0.5)          # let dimmer finish whatever it was saying
-    uart.reset_input_buffer()         # discard any mis-aligned response bytes
+async def _dimmer_reinit() -> None:
+    """Tear down and recreate the DimmerLink I2C bus safely."""
+    global dimmer_i2c
+    if dimmer_i2c is not None:
+        # Wait for the bus to unlock so we don't crash active background reads
+        retries = 10
+        while not dimmer_i2c.try_lock() and retries > 0:
+            await asyncio.sleep(0.01)
+            retries -= 1
+        try:
+            dimmer_i2c.deinit()
+        except Exception:
+            pass
+    await asyncio.sleep(0.050)
+    dimmer_i2c = _dimmer_i2c_init()
 
-
-def _uart_reinit():
-    """Recreate UART object if the bus/protocol stack wedges."""
-    global uart
+async def _dimmer_read_reg(reg: int) -> int | None:
+    if dimmer_i2c is None:
+        return None
+    result = bytearray(1)
+    retries = _I2C_LOCK_TIMEOUT
+    while not dimmer_i2c.try_lock():
+        retries -= 1
+        if retries <= 0:
+            print("DimmerLink: I2C bus lock timeout (read)")
+            return None
+        await asyncio.sleep(0.010)
     try:
-        uart.deinit()
-    except Exception:
-        pass
-    time.sleep(0.050)
-    uart = busio.UART(
-        tx=_UART_TX_PIN,
-        rx=_UART_RX_PIN,
-        baudrate=_UART_BAUDRATE,
-        timeout=_UART_TIMEOUT_S,
-    )
+        dimmer_i2c.writeto_then_readfrom(_DIMMER_ADDR, bytes([reg]), result)
+        return result[0]
+    except OSError as e:
+        print(f"DimmerLink: read reg 0x{reg:02X} failed — {_decode_i2c_error(e)}")
+        return None
+    finally:
+        dimmer_i2c.unlock()
 
-
-async def _uart_wait_tx_slot():
-    """Guarantee a minimum silence gap between UART commands."""
-    global _last_uart_tx_s
-    now = time.monotonic()
-    wait_s = _UART_MIN_TX_GAP_S - (now - _last_uart_tx_s)
-    if wait_s > 0:
-        await asyncio.sleep(wait_s)
-    _last_uart_tx_s = time.monotonic()
-
-
-async def _read_dimmer_frame(wait_s: float = 0.050):
-    """Read one full DimmerLink response frame after a command."""
-    deadline = time.monotonic() + wait_s
-    while time.monotonic() < deadline:
-        if uart.in_waiting:
-            await asyncio.sleep(0.005)
-            frame = uart.read(uart.in_waiting)
-            if frame:
-                return frame
-        await asyncio.sleep(0.002)
-    return None
-
-
-async def _dimmer_reset() -> bool:
-    """
-    Request a DimmerLink protocol reset (0x02 0x58).
-    Best effort: some firmware revisions ACK it, others stay silent.
-    """
-    await _uart_wait_tx_slot()
-    uart.reset_input_buffer()
-    uart.write(bytes([0x02, 0x58]))
-    frame = await _read_dimmer_frame(wait_s=0.080)
-    status = frame[0] if frame else None
-
-    if status is None:
-        print("DimmerLink: reset sent (no ACK)")
-        return True
-    if status == _UART_ACK_OK:
-        print("DimmerLink: reset ACK")
-        return True
-
-    print(f"DimmerLink: reset ERR 0x{status:02X}")
-    return False
-
-
-async def _dimmer_write(speed: int) -> bool:
-    """One attempt: flush → send → wait → check ACK. Caller holds _uart_busy."""
-    await _uart_wait_tx_slot()
-    uart.reset_input_buffer()
-    uart.write(bytes([0x02, 0x53, 0x00, speed]))
-    frame = await _read_dimmer_frame(wait_s=0.140)
-    status = frame[0] if frame else None
-
-    if status == _UART_ACK_OK:
-        return True
-    if status is None:
-        print("DimmerLink: no ACK")
+async def _dimmer_write_reg(reg: int, value: int) -> bool:
+    if dimmer_i2c is None:
         return False
+    retries = _I2C_LOCK_TIMEOUT
+    while not dimmer_i2c.try_lock():
+        retries -= 1
+        if retries <= 0:
+            print("DimmerLink: I2C bus lock timeout (write)")
+            return False
+        await asyncio.sleep(0.010)
+    try:
+        dimmer_i2c.writeto(_DIMMER_ADDR, bytes([reg, value]))
+        return True
+    except OSError as e:
+        print(f"DimmerLink: write reg 0x{reg:02X}=0x{value:02X} failed — {_decode_i2c_error(e)}")
+        return False
+    finally:
+        dimmer_i2c.unlock()
 
-    print(f"DimmerLink ERR: 0x{status:02X}")
-    return False
+async def _dimmer_set_level(speed: int) -> bool:
+    speed = max(0, min(100, int(speed)))
+    return await _dimmer_write_reg(_REG_LEVEL, speed)
 
+# ── DimmerLink background task ────────────────────────────────────────────────
 
 async def dimmer_updater() -> None:
-    global _last_sent_speed, _uart_busy, _last_known_dimmer_percent, _consecutive_write_failures
-
-    await asyncio.sleep(0.3)
-    uart.reset_input_buffer()
+    global _last_sent_speed, _last_known_dimmer_percent, _consecutive_write_failures
+    await asyncio.sleep(0.5) 
 
     while True:
         if target_fan_speed == _last_sent_speed:
             _speed_event.clear()
             await _speed_event.wait()
+            continue
 
-        # Coalesce slider bursts: wait for input to settle, then send only latest.
-        while (time.monotonic() - _last_target_update_s) < _SPEED_SETTLE_WINDOW_S:
-            await asyncio.sleep(0.01)
         speed = target_fan_speed
+        ok = await _dimmer_set_level(speed)
 
-        while _uart_busy:
-            await asyncio.sleep(0.01)
-        _uart_busy = True
-        try:
-            sent = await _dimmer_write(speed)
-        finally:
-            _uart_busy = False
-
-        if sent:
+        if ok:
             _consecutive_write_failures = 0
             _last_sent_speed = speed
             _last_known_dimmer_percent = speed
-            print(f"DimmerLink: {speed}% OK")
+            print(f"DimmerLink: set to {speed}%")
         else:
-            # If command channel is wedged, issue protocol reset before retry.
-            print(f"DimmerLink: retrying {speed}% after recovery/reset...")
-            await _uart_recover()
-            await _dimmer_reset()
-            await asyncio.sleep(0.120)
+            _consecutive_write_failures += 1
+            backoff = min(0.050 * _consecutive_write_failures, 0.500)
+            print(f"DimmerLink: write failed (attempt {_consecutive_write_failures}), backing off {backoff:.3f}s")
+            await asyncio.sleep(backoff)
 
-            while _uart_busy:
-                await asyncio.sleep(0.01)
-            _uart_busy = True
-            try:
-                sent = await _dimmer_write(speed)
-            finally:
-                _uart_busy = False
-
-            if sent:
+            if _consecutive_write_failures >= _DIMMER_MAX_FAILURES:
+                print("DimmerLink: hard recovery — reinitialising I2C bus")
+                await _dimmer_reinit()
                 _consecutive_write_failures = 0
-                _last_sent_speed = speed
-                _last_known_dimmer_percent = speed
-                print(f"DimmerLink: {speed}% OK (retry)")
-            else:
-                _consecutive_write_failures += 1
-                print(f"DimmerLink: gave up on {speed}%")
-                _last_sent_speed = speed   # stop looping on this value
-                await _uart_recover()      # recover before accepting next command
 
-                # Hard recovery if we fail repeatedly: reinitialize UART + reset protocol.
-                if _consecutive_write_failures >= 2:
-                    print("DimmerLink: hard recovery (UART reinit + reset)")
-                    _uart_reinit()
-                    await asyncio.sleep(0.150)
-                    await _dimmer_reset()
-                    await _uart_recover()
+                if dimmer_i2c is not None:
+                    await asyncio.sleep(0.300)
+                    await _dimmer_write_reg(_REG_COMMAND, 0x01)
+                    await asyncio.sleep(0.100)
+                else:
+                    print("DimmerLink: reinit failed — backing off 2s")
+                    await asyncio.sleep(2.0)
 
+async def get_dimmer_percent() -> int:
+    global _last_percent_poll_s, _last_known_dimmer_percent
 
-async def get_dimmer_percent():
-    global _uart_busy, _last_percent_poll_s, _last_known_dimmer_percent
     now = time.monotonic()
-
-    # Avoid extra UART traffic while a new speed is pending or after a recent poll.
-    if target_fan_speed != _last_sent_speed:
-        return _last_known_dimmer_percent
-    if (now - _last_percent_poll_s) < _DIMMER_POLL_INTERVAL_S:
+    if (now - _last_percent_poll_s) < _DIMMER_READ_INTERVAL_S:
         return _last_known_dimmer_percent
 
-    while _uart_busy:
-        await asyncio.sleep(0.01)
-    _uart_busy = True
-    try:
-        await _uart_wait_tx_slot()
-        uart.reset_input_buffer()
-        uart.write(bytes([0x02, 0x47, 0x00]))
-        frame = await _read_dimmer_frame(wait_s=0.120)
-        if frame and frame[0] == _UART_ACK_OK and len(frame) >= 2:
-            _last_known_dimmer_percent = frame[1]
-            _last_percent_poll_s = time.monotonic()
-            return _last_known_dimmer_percent
-    finally:
-        _uart_busy = False
+    val = await _dimmer_read_reg(_REG_LEVEL)
+    if val is not None:
+        # Fuzzy match to compensate for the hardware's 8-bit rounding errors.
+        # If the readback is within 1% of what we asked for, display our target value.
+        if abs(val - _last_sent_speed) <= 1:
+            _last_known_dimmer_percent = _last_sent_speed
+        else:
+            _last_known_dimmer_percent = val
+            
+    _last_percent_poll_s = now
     return _last_known_dimmer_percent
 
 # ── I2C & SDP810 setup ────────────────────────────────────────────────────────
@@ -227,12 +192,12 @@ except RuntimeError as e:
     i2c = None
 
 SDP810_ADDR       = 0x25
-CMD_START_AVG     = bytes([0x36, 0x08])  # continuous measurement, averaged
+CMD_START_AVG     = bytes([0x36, 0x15])
 CMD_STOP          = bytes([0x3F, 0xF9])
-_sdp810_buf       = bytearray(9)         # pre-allocated, avoids GC pressure
+_sdp810_buf       = bytearray(9)
 _sdp810_running   = False
+_sdp810_available = False
 
-# ── CRC-8 (poly 0x31, init 0xFF) ─────────────────────────────────────────────
 def _crc8(data: bytes) -> int:
     crc = 0xFF
     for byte in data:
@@ -242,105 +207,103 @@ def _crc8(data: bytes) -> int:
             crc &= 0xFF
     return crc
 
-def _sdp810_write(cmd: bytes):
+# Made async to prevent blocking the entire event loop
+async def _sdp810_write(cmd: bytes):
     if i2c is None:
         raise OSError("I2C not initialised")
     while not i2c.try_lock():
-        pass
+        await asyncio.sleep(0.01) # Yield to event loop instead of passing
     try:
         i2c.writeto(SDP810_ADDR, cmd)
     finally:
         i2c.unlock()
 
-# Replace your sdp810_start() call and the measure_airspeed loop:
-
-_sdp810_available = False
-
-def sdp810_start():
+async def sdp810_start():
     global _sdp810_running, _sdp810_available
     try:
-        _sdp810_write(CMD_START_AVG)
+        await _sdp810_write(CMD_START_AVG)
         _sdp810_running = True
         _sdp810_available = True
-        time.sleep(0.020)
+        await asyncio.sleep(0.020) # Replaced time.sleep with asyncio.sleep
         print("SDP810 ready")
     except (RuntimeError, OSError) as e:
-        print(f"SDP810 not found, running without sensor: {e}")
+        print(f"SDP810 not found, running without sensor: {_decode_i2c_error(e)}")
         _sdp810_available = False
 
-def sdp810_stop():
+async def sdp810_stop():
     global _sdp810_running
-    _sdp810_write(CMD_STOP)
+    await _sdp810_write(CMD_STOP)
     _sdp810_running = False
 
-def sdp810_read() -> tuple:
-    """
-    Read one measurement frame (9 bytes) and return (pressure_pa, temperature_c).
-    Raises ValueError on CRC mismatch.
-    """
+# Made async to prevent blocking
+async def sdp810_read() -> tuple:
     while not i2c.try_lock():
-        pass
+        await asyncio.sleep(0.01)
     try:
         i2c.readfrom_into(SDP810_ADDR, _sdp810_buf)
     finally:
         i2c.unlock()
 
-    # Verify all three CRCs
-    if _crc8(_sdp810_buf[0:2]) != _sdp810_buf[2]:
-        raise ValueError("SDP810 CRC fail: pressure bytes")
-    if _crc8(_sdp810_buf[3:5]) != _sdp810_buf[5]:
-        raise ValueError("SDP810 CRC fail: temperature bytes")
-    if _crc8(_sdp810_buf[6:8]) != _sdp810_buf[8]:
-        raise ValueError("SDP810 CRC fail: scale factor bytes")
+    if _crc8(_sdp810_buf[0:2]) != _sdp810_buf[2]: raise ValueError("SDP810 CRC fail: pressure bytes")
+    if _crc8(_sdp810_buf[3:5]) != _sdp810_buf[5]: raise ValueError("SDP810 CRC fail: temperature bytes")
+    if _crc8(_sdp810_buf[6:8]) != _sdp810_buf[8]: raise ValueError("SDP810 CRC fail: scale factor bytes")
 
-    # struct.unpack ">h" = big-endian signed int16 — safe in all CircuitPython versions
     raw_pressure  = struct.unpack(">h", _sdp810_buf[0:2])[0]
     raw_temp      = struct.unpack(">h", _sdp810_buf[3:5])[0]
     scale_factor  = struct.unpack(">h", _sdp810_buf[6:8])[0]
 
-    pressure_pa    = raw_pressure  / scale_factor   # Pa
-    temperature_c  = raw_temp      / 200.0          # °C
+    pressure_pa    = raw_pressure  / scale_factor
+    temperature_c  = raw_temp      / 200.0
 
     return pressure_pa, temperature_c
 
-# ── Air data ──────────────────────────────────────────────────────────────────
-division_ratio = 2.739 / 1.835
-R_SPECIFIC = 287.05 # J/(kg·K)
-smoothed_airspeed_ms = 0
+# ── ADC / Voltage sensing ─────────────────────────────────────────────────────
+_ADC_PIN          = board.GP28        # ADC2
+_ADC_REF_V        = 3.3
+_ADC_MAX          = 65535
+_ADC_ALPHA        = 0.2               # EMA smoothing factor (0-1, lower = smoother)
+_adc              = analogio.AnalogIn(_ADC_PIN)
+smoothed_voltage  = 0.0               # Volts, updated at 20 Hz
 
-current_temperate = 15 # °C
-current_pressure = 101325 # Pa
+async def adc_sampler():
+    """Read ADC2 at 20 Hz and apply exponential moving average."""
+    global smoothed_voltage
+    # Seed with the first reading so the EMA doesn't ramp from zero
+    smoothed_voltage = (_adc.value / _ADC_MAX) * _ADC_REF_V
+    while True:
+        raw_v = (_adc.value / _ADC_MAX) * _ADC_REF_V
+        smoothed_voltage = _ADC_ALPHA * raw_v + (1 - _ADC_ALPHA) * smoothed_voltage
+        await asyncio.sleep(0.05)     # 20 Hz
+
+# ── Air data ──────────────────────────────────────────────────────────────────
+shunt_value = 4700 # Ohms
+R_SPECIFIC = 287.05
+smoothed_airspeed_ms = 0
+current_temperate = 15
+current_pressure = 101325
 air_density = current_pressure / (R_SPECIFIC * (current_temperate + 273.15))
 
-# PID parameters (for fan control which will be implemented later)
 Kp = 0
 Ki = 0
 Kd = 0
 
-
-# WiFi configuration
 SSID = "Zephyros"
 PASSWORD = "password"
 PORT = 80
 
-# Setup LED
 led = digitalio.DigitalInOut(board.LED)
 led.direction = digitalio.Direction.OUTPUT
 
-# Setup WiFi AP
 print("Creating access point...")
 wifi.radio.start_ap(ssid=SSID, password=PASSWORD)
-print("Access point started")
-print("AP IP Address:", wifi.radio.ipv4_address_ap)
+print("Access point started. IP:", wifi.radio.ipv4_address_ap)
 
-# Create socket pool and server
 pool = socketpool.SocketPool(wifi.radio)
 server = Server(pool, "/static", debug=True)
 
-# WebSocket state
 current_websocket = None
 last_message_time = 0
-MIN_MESSAGE_INTERVAL = 0.05  # seconds
+MIN_MESSAGE_INTERVAL = 0.05
 
 @server.route("/")
 def index(request: Request):
@@ -362,22 +325,27 @@ def ws_handler(request: Request):
     global current_websocket
     websocket = Websocket(request)
     current_websocket = websocket
+    # Start at 0% — wait for explicit set_fan_speed from client
+    set_target_fan_speed(0)
     print("WebSocket client connected")
     asyncio.create_task(blink(2))
     return websocket
 
+def _on_websocket_disconnect():
+    """Safety: turn off the fan when the control link is lost."""
+    set_target_fan_speed(0)
+    print("Fan set to 0% (WebSocket disconnected)")
+
 async def handle_websocket_message(message):
-    global Kp, Ki, Kd, division_ratio, air_density, current_fan_speed
+    global Kp, Ki, Kd, shunt_value, air_density, current_fan_speed
     try:
         data = json.loads(message)
         print(data)
 
         if data.get('action') == 'calibrate':
-            # SDP810 is self-zeroing — re-start continuous mode to trigger
-            # the sensor's internal zero-point calibration sequence
-            sdp810_stop()
+            await sdp810_stop()
             await asyncio.sleep(0.05)
-            sdp810_start()
+            await sdp810_start()
             print("SDP810 re-started (self-zero applied)")
         elif data.get('action') == 'send_settings':
             await send_current_settings()
@@ -391,7 +359,7 @@ async def handle_websocket_message(message):
             Kp = data.get('Kp', Kp)
             Ki = data.get('Ki', Ki)
             Kd = data.get('Kd', Kd)
-            division_ratio = data.get('division_ratio', division_ratio)
+            shunt_value = data.get('shunt_value', shunt_value)
             air_density = data.get('air_density', air_density)
             await asyncio.sleep(0.1)
             await send_current_settings()
@@ -413,6 +381,7 @@ async def send_websocket_message(data, important=False):
     except Exception as e:
         print("Error sending message:", e)
         current_websocket = None
+        _on_websocket_disconnect()
         return False
 
 async def handle_websockets():
@@ -426,7 +395,7 @@ async def handle_websockets():
             except Exception as e:
                 print(f"WebSocket error: {e}")
                 current_websocket = None
-                print("WebSocket client disconnected")
+                _on_websocket_disconnect()
                 asyncio.create_task(blink(3, on_time=0.05, off_time=0.05))
         await asyncio.sleep(0)
 
@@ -443,11 +412,13 @@ async def run_server():
 async def sensor_broadcaster():
     while True:
         if current_websocket:
+            voltage = smoothed_voltage
+            power_mw = (voltage ** 2 / shunt_value) * 1000 if shunt_value else 0
             telemetry = {
                 "type":       "telemetry",
-                "voltage":    0.3,
-                "resistance": 10000,
-                "power":      10,
+                "voltage":    round(voltage, 4),
+                "resistance": shunt_value,
+                "power":      round(power_mw, 4),
                 "air_speed":  smoothed_airspeed_ms,
                 "fan_speed":  await get_dimmer_percent(),
                 "uptime":     time.monotonic(),
@@ -462,7 +433,7 @@ async def send_current_settings():
             "Kp":             Kp,
             "Ki":             Ki,
             "Kd":             Kd,
-            "division_ratio": division_ratio,
+            "shunt_value":    shunt_value,
             "air_density":    air_density,
         }
         await send_websocket_message(settings)
@@ -472,49 +443,31 @@ async def send_plotting_data():
         data = { 
             "type": "plot_data",
             "airspeed": smoothed_airspeed_ms,
-            "power": current_fan_speed,
+            "power": round((smoothed_voltage ** 2 / shunt_value) * 1000, 4) if shunt_value else 0,
         }
         await send_websocket_message(data)
-            
 
 async def measure_airspeed():
-    """
-    Continuously reads the SDP810 and updates smoothed_airspeed_ms.
-    No software smoothing needed — CMD_START_AVG already averages all
-    sensor samples accumulated between reads (~25 samples at 20 Hz polling).
-    Temperature is also captured from each frame to keep air_density current.
-    """
     global smoothed_airspeed_ms, air_density, current_temperate
 
     while True:
         if _sdp810_available:
             try:
-                pressure_pa, temperature_c = sdp810_read()
-                print(f"Pressure: {pressure_pa} Pa, Temperature: {temperature_c} °C")
-                # Keep air density updated using live temperature from the sensor
+                pressure_pa, temperature_c = await sdp810_read()
                 current_temperate = temperature_c
                 air_density = current_pressure / (R_SPECIFIC * (temperature_c + 273.15))
-
-                # Negative pressure = reversed flow or noise at zero — clamp to 0
                 pressure_pa = max(0.0, pressure_pa)
-
                 smoothed_airspeed_ms = math.sqrt((2.0 * pressure_pa) / air_density)
 
             except ValueError as e:
-                # CRC mismatch — skip this frame, not a fatal error
                 print(f"SDP810 read error (skipping frame): {e}")
             except OSError as e:
-                # I2C bus error — sensor may have been disconnected
-                print(f"SDP810 I2C error: {e}")
-                await asyncio.sleep(1.0)  # back off before retrying
-
-        await asyncio.sleep(0.05)  # 20 Hz
+                print(f"SDP810 I2C error: {_decode_i2c_error(e)}")
+                await asyncio.sleep(1.0) 
+        await asyncio.sleep(0.05)
 
 async def main():
-    # Start the SDP810 before launching tasks
-    print("Starting SDP810 continuous measurement...")
-    sdp810_start()
-
+    await sdp810_start()
 
     await asyncio.gather(
         run_server(),
@@ -522,6 +475,7 @@ async def main():
         measure_airspeed(),
         sensor_broadcaster(),
         dimmer_updater(),
+        adc_sampler(),
     )
 
 asyncio.run(main())

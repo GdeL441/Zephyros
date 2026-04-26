@@ -151,8 +151,7 @@
 #kp-current,
 #ki-current,
 #kd-current,
-#baseline-current,
-#division-current,
+#shunt-current,
 #density-current {
   font-family: 'Courier New', Courier, monospace;
   font-variant-numeric: tabular-nums;
@@ -309,7 +308,7 @@
   line-height: 1.5;
   white-space: nowrap;
   backdrop-filter: blur(6px);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.22);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
   opacity: 0;
   transition: opacity 0.15s;
   z-index: 10;

@@ -57,13 +57,13 @@ fanSpeedValueEl.addEventListener('blur', () => {
   } else {
     val = Math.max(0, Math.min(100, Math.round(val)));
   }
-  
+
   fanSpeedValueEl.textContent = val;
-  
+
   if (parseInt(fanSpeedSlider.value, 10) !== val) {
     fanSpeedSlider.value = val;
     updateSliderBackground();
-    
+
     if (ws) {
       ws.send(JSON.stringify({ action: 'set_fan_speed', speed: val }));
     }
@@ -134,8 +134,7 @@ async function connectWs(url) {
       document.getElementById('kp-current').innerText = fmt(data.Kp);
       document.getElementById('ki-current').innerText = fmt(data.Ki);
       document.getElementById('kd-current').innerText = fmt(data.Kd);
-      document.getElementById('baseline-current').innerText = fmt(data.sensor_baseline);
-      document.getElementById('division-current').innerText = fmt(data.division_ratio);
+      document.getElementById('shunt-current').innerText = data.shunt_value;
       document.getElementById('density-current').innerText = fmt(data.air_density);
     }
 
@@ -322,11 +321,10 @@ window.addEventListener("DOMContentLoaded", () => {
     if (!ws) return;
     ws.send(JSON.stringify({
       action: "new_settings",
-      sensor_baseline: Number(document.getElementById("baseline-value").value),
       Kp: Number(document.getElementById("kp-value").value),
       Ki: Number(document.getElementById("ki-value").value),
       Kd: Number(document.getElementById("kd-value").value),
-      division_ratio: Number(document.getElementById("division-value").value),
+      shunt_value: Number(document.getElementById("shunt-value").value),
       air_density: Number(document.getElementById("density-value").value),
     }));
   });
@@ -365,8 +363,7 @@ const PERSISTED_INPUTS = [
   'kp-value',
   'ki-value',
   'kd-value',
-  'baseline-value',
-  'division-value',
+  'shunt-value',
   'density-value',
 ];
 
@@ -404,8 +401,8 @@ function persistInputs() {
 
 // One colour per pitch-angle value (0°–30° in 5° steps)
 const PITCH_COLORS = {
-  0:  '#4680ff',   // blue
-  5:  '#51cf66',   // green
+  0: '#4680ff',   // blue
+  5: '#51cf66',   // green
   10: '#fcc419',   // yellow
   15: '#ff922b',   // orange
   20: '#ff6b6b',   // red
@@ -560,7 +557,7 @@ class LiveGraph {
 
     const now = new Date();
     const pad2 = (n) => String(n).padStart(2, '0');
-    const defaultName = `PowerVsAirspeed_${now.getFullYear()}-${pad2(now.getMonth()+1)}-${pad2(now.getDate())}_${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}.csv`;
+    const defaultName = `PowerVsAirspeed_${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}_${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}.csv`;
 
     try {
       const result = await window.__TAURI__.core.invoke('save_csv', {
@@ -710,7 +707,7 @@ class LiveGraph {
 
     // ── Hover tooltip (nearest point) ────────────────────────────
     if (this._hoverX != null && this._hoverX >= pad.left && this._hoverX <= w - pad.right &&
-        this._hoverY != null && this._hoverY >= pad.top && this._hoverY <= h - pad.bottom) {
+      this._hoverY != null && this._hoverY >= pad.top && this._hoverY <= h - pad.bottom) {
 
       // Find nearest visible point to cursor
       let best = null, bestDist = Infinity;
