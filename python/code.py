@@ -13,8 +13,8 @@ import struct
 import errno  # Added for precise I2C error parsing
 
 # ── I2C / DimmerLink ──────────────────────────────────────────────────────────
-_DIMMER_SDA_PIN = board.GP12
-_DIMMER_SCL_PIN = board.GP13
+_DIMMER_SDA_PIN = board.GP20
+_DIMMER_SCL_PIN = board.GP21
 _DIMMER_ADDR    = 0x50
 
 _REG_STATUS  = 0x00
@@ -184,6 +184,12 @@ async def get_dimmer_percent() -> int:
     _last_percent_poll_s = now
     return _last_known_dimmer_percent
 
+async def calibrate_dimmerlink():
+    pass
+
+async def reset_dimmerlink():
+    pass    
+
 # ── I2C & SDP810 setup ────────────────────────────────────────────────────────
 try:
     i2c = busio.I2C(scl=board.GP27, sda=board.GP26, frequency=100_000)
@@ -254,7 +260,6 @@ async def sdp810_read() -> tuple:
 
     pressure_pa    = raw_pressure  / scale_factor
     temperature_c  = raw_temp      / 200.0
-
     return pressure_pa, temperature_c
 
 # ── ADC / Voltage sensing ─────────────────────────────────────────────────────
@@ -342,7 +347,7 @@ async def handle_websocket_message(message):
         data = json.loads(message)
         print(data)
 
-        if data.get('action') == 'calibrate':
+        if data.get('action') == 'reset_dps':
             await sdp810_stop()
             await asyncio.sleep(0.05)
             await sdp810_start()
@@ -363,6 +368,13 @@ async def handle_websocket_message(message):
             air_density = data.get('air_density', air_density)
             await asyncio.sleep(0.1)
             await send_current_settings()
+        elif data.get('action') == 'reset_dimmerlink':
+            await reset_dimmerlink()
+        elif data.get('action') == 'calibrate_dimmerlink':
+            await calibrate_dimmerlink()
+        else:
+            print("Unknown action:", data.get('action'))
+            
 
     except Exception as e:
         print("Error handling WebSocket message:", e)
@@ -456,9 +468,10 @@ async def measure_airspeed():
                 pressure_pa, temperature_c = await sdp810_read()
                 current_temperate = temperature_c
                 air_density = current_pressure / (R_SPECIFIC * (temperature_c + 273.15))
-                pressure_pa = max(0.0, pressure_pa)
-                smoothed_airspeed_ms = math.sqrt((2.0 * pressure_pa) / air_density)
-
+                if pressure_pa <= 0:
+                    smoothed_airspeed_ms = -1 * math.sqrt((2.0 * abs(pressure_pa)) / air_density)
+                else:
+                    smoothed_airspeed_ms = math.sqrt((2.0 * pressure_pa) / air_density)
             except ValueError as e:
                 print(f"SDP810 read error (skipping frame): {e}")
             except OSError as e:

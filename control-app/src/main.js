@@ -217,7 +217,7 @@ window.addEventListener("DOMContentLoaded", () => {
   const sensorsBtn = document.querySelector("#monitor-btn")
   const getSettingsBtn = document.querySelector("#get-settings-btn")
   const applySettingsBtn = document.querySelector("#apply-settings-btn")
-  const calibrateBtn = document.querySelector("#calibrate-dps")
+  const resetDPSBtn = document.querySelector("#reset-dps")
   const testBtn = document.querySelector("#send-test")
   const startFanBtn = document.querySelector("#start-fan")
 
@@ -278,13 +278,6 @@ window.addEventListener("DOMContentLoaded", () => {
 
     // Send command to server
     ws.send(JSON.stringify({ action: newMonitoringState ? "start_monitor" : "stop_monitor" }));
-
-    // If starting monitoring, clear previous values
-    if (newMonitoringState) {
-      document.getElementById("left-sensor-value").textContent = "--";
-      document.getElementById("right-sensor-value").textContent = "--";
-      document.getElementById("back-sensor-value").textContent = "--";
-    }
   });
 
   startFanBtn?.addEventListener("click", async () => {
@@ -334,21 +327,21 @@ window.addEventListener("DOMContentLoaded", () => {
     ws.send(JSON.stringify({ type: "telemetry", fan_speed: 20, power: 40, uptime: 100 }))
   });
 
-  calibrateBtn?.addEventListener("click", async () => {
+  resetDPSBtn?.addEventListener("click", async () => {
     if (!ws) return;
 
     // Show a loading state on the button
-    calibrateBtn.disabled = true;
-    calibrateBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Calibrating...';
+    resetDPSBtn.disabled = true;
+    resetDPSBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Resetting DPS...';
 
     // Send calibration command
-    ws.send(JSON.stringify({ action: "calibrate" }));
+    ws.send(JSON.stringify({ action: "reset_dps" }));
 
     // Reset button after 3 seconds (even if no response)
     setTimeout(() => {
-      calibrateBtn.disabled = false;
-      calibrateBtn.textContent = "Calibrate DPS";
-    }, 3000);
+      resetDPSBtn.disabled = false;
+      resetDPSBtn.textContent = "Reset DPS";
+    }, 500);
   });
 
   // ── Live Graph setup ──────────────────────────────────────────────
@@ -426,7 +419,7 @@ class LiveGraph {
     this.hiddenPitches = new Set();
 
     // Layout constants (CSS pixels)
-    this.pad = { top: 18, right: 20, bottom: 56, left: 62 };
+    this.pad = { top: 18, right: 20, bottom: 45, left: 62 };
 
     this._rafId = null;
     this._hoverX = null;
@@ -435,6 +428,7 @@ class LiveGraph {
     this._initTooltip();
     this._bindResize();
     this._bindHover();
+    this._bindContextMenu();
     this._resize();
     this._drawEmpty();
   }
@@ -480,6 +474,57 @@ class LiveGraph {
       this._hoverY = null;
       this.tooltip.classList.remove('visible');
       this._scheduleFrame();
+    });
+  }
+
+  // ── Context menu (delete point) ──────────────────────────────────
+  _bindContextMenu() {
+    this.canvas.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const rect = this.canvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const { cssW: w, cssH: h, pad } = this;
+      const plotW = w - pad.left - pad.right;
+      const plotH = h - pad.top - pad.bottom;
+      if (plotW <= 0 || plotH <= 0) return;
+
+      const visible = this.points.filter(p => !this.hiddenPitches.has(p.pitch));
+      if (visible.length === 0) return;
+
+      // Compute bounds (same as _draw)
+      let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+      for (const p of visible) {
+        if (p.x < xMin) xMin = p.x; if (p.x > xMax) xMax = p.x;
+        if (p.y < yMin) yMin = p.y; if (p.y > yMax) yMax = p.y;
+      }
+      if (!isFinite(xMin)) return;
+      if (xMax === xMin) { xMin -= 0.5; xMax += 0.5; }
+      if (yMax === yMin) { yMin -= 0.5; yMax += 0.5; }
+      const xRange = xMax - xMin;
+      const yRange = yMax - yMin;
+      xMin -= xRange * 0.06; xMax += xRange * 0.06;
+      yMin -= yRange * 0.08; yMax += yRange * 0.08;
+
+      const mapX = (v) => pad.left + ((v - xMin) / (xMax - xMin)) * plotW;
+      const mapY = (v) => pad.top + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+      let bestIdx = -1, bestDist = Infinity;
+      for (let i = 0; i < this.points.length; i++) {
+        const p = this.points[i];
+        if (this.hiddenPitches.has(p.pitch)) continue;
+        const px = mapX(p.x);
+        const py = mapY(p.y);
+        const d = Math.hypot(px - mouseX, py - mouseY);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      }
+
+      if (bestIdx !== -1 && bestDist < 20) {
+        this.points.splice(bestIdx, 1);
+        this._updateLegend();
+        this._scheduleFrame();
+      }
     });
   }
 
@@ -674,7 +719,7 @@ class LiveGraph {
     ctx.font = FONT_LABEL;
     ctx.fillStyle = LABEL_COLOR;
     ctx.textAlign = 'center';
-    ctx.fillText(this.xLabel, pad.left + plotW / 2, h - 6);
+    ctx.fillText(this.xLabel, pad.left + plotW / 2, h - 12);
 
     // Plot border
     ctx.strokeStyle = '#dee2e6';
@@ -810,6 +855,7 @@ function initLiveGraph() {
       toggleBtn.classList.add('btn-danger');
       toggleText.textContent = 'Stop Graphing';
       toggleBtn.querySelector('i').className = 'ti ti-player-stop me-1';
+      sendDataBtn?.classList.add('visible');
 
       if (ws) ws.send(JSON.stringify({ action: 'start_graphing' }));
     } else {
@@ -819,6 +865,7 @@ function initLiveGraph() {
       toggleBtn.classList.add('btn-success');
       toggleText.textContent = 'Start Graphing';
       toggleBtn.querySelector('i').className = 'ti ti-player-play me-1';
+      sendDataBtn?.classList.remove('visible');
 
       if (ws) ws.send(JSON.stringify({ action: 'stop_graphing' }));
     }
