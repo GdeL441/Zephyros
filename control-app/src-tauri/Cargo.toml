@@ -1,6 +1,6 @@
 [package]
 name = "Zephyros_Control_App"
-version = "0.0.1"
+version = "1.0.0"
 description = "A Tauri App"
 authors = ["Gilles de Looze", "MECH2A2"]
 edition = "2021"
@@ -26,3 +26,6 @@ serde_json = "1"
 wifi-rs = "0.2.4"
 wifi_scan = "0.7"
 # gilrs removed, no longer using gamepad support
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-location = { version = "0.3", features = ["CLLocationManager"] }

@@ -302,7 +302,9 @@ async function scan() {
   } catch (error) {
     console.error('Error scanning networks:', error);
     loading.classList.add('d-none');
-    noNetworks.textContent = 'Error scanning networks. Please try again.';
+    // Surface the Rust-side error string (typed as String in #[tauri::command]).
+    const msg = typeof error === 'string' ? error : (error?.message ?? 'Unknown error');
+    noNetworks.textContent = `Wi-Fi scan failed: ${msg}`;
     noNetworks.classList.remove('d-none');
   }
 }
