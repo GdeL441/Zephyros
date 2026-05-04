@@ -2,6 +2,7 @@ const { invoke, } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 let ws = null;
+let pendingFanMode = null;
 
 function addToLog(message, type) {
   const log = document.getElementById('websocket-log');
@@ -38,9 +39,73 @@ fanSpeedSlider.addEventListener('input', () => {
   updateSliderBackground();
 });
 
+let currentSliderMode = 'percent';
+
+function updateSliderMode(mode) {
+  if (currentSliderMode === mode) return;
+  currentSliderMode = mode;
+
+  const unitEl = document.getElementById('fan-speed-unit');
+  if (!unitEl) return;
+
+  if (mode === 'percent') {
+    fanSpeedSlider.min = 0;
+    fanSpeedSlider.max = 100;
+    fanSpeedSlider.step = 1;
+    unitEl.textContent = '%';
+    // Reset to 0 when coming back from PID
+    fanSpeedSlider.value = 0;
+    fanSpeedValueEl.textContent = '0';
+  } else if (mode === 'pid') {
+    fanSpeedSlider.min = 0;
+    fanSpeedSlider.max = 10;
+    fanSpeedSlider.step = 0.1;
+    unitEl.textContent = 'm/s';
+    // Default to 5 m/s (matches backend default setpoint)
+    fanSpeedSlider.value = 5;
+    fanSpeedValueEl.textContent = '5.0';
+  }
+
+  updateSliderBackground();
+}
+
+function setFanModeButton(mode) {
+  const fanModeBtn = document.getElementById('fan-control-mode-btn');
+  if (!fanModeBtn) return;
+  if (mode === 'percent') {
+    fanModeBtn.textContent = 'Percentage';
+    fanModeBtn.className = 'btn btn-primary flex-grow-1';
+    fanModeBtn.setAttribute('data-mode', 'percent');
+    updateSliderMode('percent');
+  } else if (mode === 'pid') {
+    fanModeBtn.textContent = 'PID';
+    fanModeBtn.className = 'btn btn-success flex-grow-1';
+    fanModeBtn.setAttribute('data-mode', 'pid');
+    updateSliderMode('pid');
+  }
+}
+
+function setDimmerCurveButton(mode) {
+  const btn = document.getElementById('dimmer-curve-mode-btn');
+  if (!btn) return;
+  if (mode === 'rms') {
+    btn.textContent = 'Dimmer curve: RMS';
+    btn.className = 'btn btn-warning w-100 mt-2';
+    btn.setAttribute('data-mode', 'rms');
+  } else if (mode === 'linear') {
+    btn.textContent = 'Dimmer curve: LINEAR';
+    btn.className = 'btn btn-outline-secondary w-100 mt-2';
+    btn.setAttribute('data-mode', 'linear');
+  } else {
+    btn.textContent = 'Dimmer curve: UNKNOWN';
+    btn.className = 'btn btn-outline-dark w-100 mt-2';
+    btn.setAttribute('data-mode', 'unknown');
+  }
+}
+
 fanSpeedSlider.addEventListener('change', () => {
   if (!ws) return;
-  ws.send(JSON.stringify({ action: 'set_fan_speed', speed: parseInt(fanSpeedSlider.value, 10) }));
+  ws.send(JSON.stringify({ action: 'set_fan_speed', speed: Number(fanSpeedSlider.value) }));
 });
 
 fanSpeedValueEl.addEventListener('keydown', (e) => {
@@ -51,16 +116,16 @@ fanSpeedValueEl.addEventListener('keydown', (e) => {
 });
 
 fanSpeedValueEl.addEventListener('blur', () => {
-  let val = parseInt(fanSpeedValueEl.textContent, 10);
+  let val = Number(fanSpeedValueEl.textContent);
   if (isNaN(val)) {
-    val = parseInt(fanSpeedSlider.value, 10);
+    val = Number(fanSpeedSlider.value);
   } else {
-    val = Math.max(0, Math.min(100, Math.round(val)));
+    val = Math.max(Number(fanSpeedSlider.min), Math.min(Number(fanSpeedSlider.max), val));
   }
 
   fanSpeedValueEl.textContent = val;
 
-  if (parseInt(fanSpeedSlider.value, 10) !== val) {
+  if (Number(fanSpeedSlider.value) !== val) {
     fanSpeedSlider.value = val;
     updateSliderBackground();
 
@@ -118,6 +183,45 @@ async function connectWs(url) {
       document.getElementById('voltage').innerText = fmtTel(data.voltage, 'V', 2);
       document.getElementById('resistance').innerText = fmtTel(data.resistance, 'Ω', 0);
       document.getElementById('power').innerText = fmtTel(data.power, 'mW', 2);
+      const tempEl = document.getElementById('temperature');
+      if (tempEl) tempEl.innerText = fmtTel(data.temperature, '°C', 2);
+      const densityEl = document.getElementById('air-density');
+      if (densityEl) densityEl.innerText = fmtTel(data.air_density, 'kg/m³', 4);
+
+      // PID status indicator
+      const pidStatusEl = document.getElementById('pid-status-row');
+      if (pidStatusEl) {
+        if (data.fan_mode === 'pid') {
+          pidStatusEl.classList.remove('d-none');
+          const setpointEl = document.getElementById('pid-setpoint-display');
+          const outputEl = document.getElementById('pid-output-display');
+          const stateEl = document.getElementById('pid-state-display');
+          if (setpointEl) setpointEl.innerText = `${data.pid_setpoint != null ? Number(data.pid_setpoint).toFixed(2) : '-'} m/s`;
+          if (outputEl) outputEl.innerText = `${data.pid_output != null ? Number(data.pid_output).toFixed(1) : '-'} %`;
+          if (stateEl) {
+            if (data.pid_active) {
+              stateEl.innerText = 'Active';
+              stateEl.className = 'badge bg-success';
+            } else {
+              stateEl.innerText = 'Wind-up';
+              stateEl.className = 'badge bg-warning text-dark';
+            }
+          }
+        } else {
+          pidStatusEl.classList.add('d-none');
+        }
+      }
+
+      if (data.fan_mode) {
+        setFanModeButton(data.fan_mode);
+        if (pendingFanMode && data.fan_mode === pendingFanMode) {
+          pendingFanMode = null;
+        }
+      }
+
+      if (data.dimmer_curve_mode) {
+        setDimmerCurveButton(data.dimmer_curve_mode);
+      }
     }
 
     // Scatter plot data from Pico: { type: "plot_data", airspeed: number, power: number }
@@ -134,8 +238,9 @@ async function connectWs(url) {
       document.getElementById('kp-current').innerText = fmt(data.Kp);
       document.getElementById('ki-current').innerText = fmt(data.Ki);
       document.getElementById('kd-current').innerText = fmt(data.Kd);
+      document.getElementById('kt-current').innerText = fmt(data.Kt);
+      document.getElementById('tf-current').innerText = fmt(data.Tf);
       document.getElementById('shunt-current').innerText = data.shunt_value;
-      document.getElementById('density-current').innerText = fmt(data.air_density);
     }
 
   };
@@ -146,6 +251,7 @@ async function connectWs(url) {
     statusDot.classList.add("bg-danger");
     updateConnectButton(false);
     ws = null;
+    pendingFanMode = null;
   };
   const originalSend = ws.send;
   ws.send = function (data) {
@@ -305,6 +411,31 @@ window.addEventListener("DOMContentLoaded", () => {
     ws.send(JSON.stringify({ action: newActiveState ? "start_fan" : "stop_fan" }));
   });
 
+  const fanControlModeBtn = document.querySelector("#fan-control-mode-btn");
+  fanControlModeBtn?.addEventListener("click", () => {
+    if (!ws) return;
+    const currentMode = fanControlModeBtn.getAttribute("data-mode");
+    const newMode = currentMode === "percent" ? "pid" : "percent";
+    pendingFanMode = newMode;
+    ws.send(JSON.stringify({ action: newMode === "pid" ? "pid_mode" : "percent_mode" }));
+
+    // Retry once if telemetry hasn't confirmed the mode yet.
+    setTimeout(() => {
+      if (!ws || pendingFanMode !== newMode) return;
+      ws.send(JSON.stringify({ action: newMode === "pid" ? "pid_mode" : "percent_mode" }));
+    }, 250);
+  });
+
+  const emergencyStopBtn = document.querySelector("#emergency-stop-btn");
+  emergencyStopBtn?.addEventListener("click", () => {
+    if (!ws) return;
+    ws.send(JSON.stringify({ action: "emergency_stop" }));
+    // Immediately reset the local slider to 0
+    fanSpeedSlider.value = 0;
+    fanSpeedValueEl.textContent = '0';
+    updateSliderBackground();
+  });
+
   getSettingsBtn?.addEventListener("click", () => {
     if (!ws) return;
     ws.send(JSON.stringify({ action: "send_settings" }));
@@ -317,14 +448,36 @@ window.addEventListener("DOMContentLoaded", () => {
       Kp: Number(document.getElementById("kp-value").value),
       Ki: Number(document.getElementById("ki-value").value),
       Kd: Number(document.getElementById("kd-value").value),
+      Kt: Number(document.getElementById("kt-value").value),
+      Tf: Number(document.getElementById("tf-value").value),
       shunt_value: Number(document.getElementById("shunt-value").value),
-      air_density: Number(document.getElementById("density-value").value),
     }));
   });
 
   testBtn?.addEventListener("click", async () => {
     if (!ws) return
     ws.send(JSON.stringify({ type: "telemetry", fan_speed: 20, power: 40, uptime: 100 }))
+  });
+
+  const dimmerCurveBtn = document.querySelector("#dimmer-curve-mode-btn");
+  dimmerCurveBtn?.addEventListener("click", () => {
+    if (!ws) return;
+    const currentCurve = dimmerCurveBtn.getAttribute("data-mode");
+    const nextCurve = currentCurve === "rms" ? "linear" : "rms";
+    ws.send(JSON.stringify({ action: "set_dimmer_curve", mode: nextCurve }));
+  });
+
+  const recalibrateBtn = document.querySelector("#recalibrate-dimmerlink-btn");
+  recalibrateBtn?.addEventListener("click", () => {
+    if (!ws) return;
+    recalibrateBtn.disabled = true;
+    const originalHTML = recalibrateBtn.innerHTML;
+    recalibrateBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Recalibrating…';
+    ws.send(JSON.stringify({ action: "recalibrate_dimmerlink" }));
+    setTimeout(() => {
+      recalibrateBtn.disabled = false;
+      recalibrateBtn.innerHTML = originalHTML;
+    }, 1500);
   });
 
   resetDPSBtn?.addEventListener("click", async () => {
@@ -356,8 +509,9 @@ const PERSISTED_INPUTS = [
   'kp-value',
   'ki-value',
   'kd-value',
+  'kt-value',
+  'tf-value',
   'shunt-value',
-  'density-value',
 ];
 
 function persistInputs() {
@@ -395,12 +549,15 @@ function persistInputs() {
 // One colour per pitch-angle value (0°–30° in 5° steps)
 const PITCH_COLORS = {
   0: '#4680ff',   // blue
-  5: '#51cf66',   // green
-  10: '#fcc419',   // yellow
-  15: '#ff922b',   // orange
-  20: '#ff6b6b',   // red
-  25: '#cc5de8',   // purple
-  30: '#20c997',   // teal
+  12: '#51cf66',   // green
+  24: '#fcc419',   // yellow
+  36: '#ff922b',   // orange
+  48: '#ff6b6b',   // red
+  60: '#cc5de8',   // purple
+  72: '#20c997',   // teal
+  84: '#ff0052',   // red
+  96: '#49c6ff',   // blue
+  108: '#277d43',   // green
 };
 
 class LiveGraph {

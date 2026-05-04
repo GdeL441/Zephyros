@@ -134,12 +134,15 @@
                     <select class="form-select form-select-sm" id="pitch-angle-select"
                       style="width: auto; min-width: 70px;">
                       <option value="0">0°</option>
-                      <option value="5">5°</option>
-                      <option value="10">10°</option>
-                      <option value="15">15°</option>
-                      <option value="20">20°</option>
-                      <option value="25">25°</option>
-                      <option value="30">30°</option>
+                      <option value="12">12°</option>
+                      <option value="24">24°</option>
+                      <option value="36">36°</option>
+                      <option value="48">48°</option>
+                      <option value="60">60°</option>
+                      <option value="72">72°</option>
+                      <option value="84">84°</option>
+                      <option value="96">96°</option>
+                      <option value="108">108°</option>
                     </select>
                   </div>
                   <button type="button" class="btn btn-success btn-sm" id="graph-toggle-btn" data-graphing="false">
@@ -193,9 +196,11 @@
             <div class="card-body">
               <h6 class="mb-3 fw-500 text-muted">Windtunnel Status</h6>
               <div class="d-flex flex-column gap-3">
-                <h4 class="mb-0" id="air-temp">Airspeed: <span id="speed-display">-</span></h4>
-                <h4 class="mb-0" id="speed-kmh">Fan Speed: <span id="fan-status">-</span></h4>
-                <h4 class="mb-0" id="speed-kmh">Uptime: <span id="uptime">-</span></h4>
+                <h4 class="mb-0">Airspeed: <span id="speed-display">-</span></h4>
+                <h4 class="mb-0">Fan Speed: <span id="fan-status">-</span></h4>
+                <h4 class="mb-0">Uptime: <span id="uptime">-</span></h4>
+                <h4 class="mb-0">Temperature: <span id="temperature">-</span></h4>
+                <h4 class="mb-0">Air Density: <span id="air-density">-</span></h4>
               </div>
             </div>
           </div>
@@ -208,11 +213,37 @@
                     style="font-size: 3rem; line-height: 1; text-shadow: 0 4px 12px rgba(70,128,255,0.25); outline: none; min-width: 1.5ch; display: inline-block; text-align: right; border-radius: 8px; transition: background 0.2s; cursor: text; padding: 0.1em 0.2em; margin-left: -0.2em;"
                     onfocus="this.style.background='rgba(70,128,255,0.1)'"
                     onblur="this.style.background='transparent'">0</span>
-                  <span class="fw-bold text-muted ms-1" style="font-size: 2rem;">%</span>
+                  <span id="fan-speed-unit" class="fw-bold text-muted ms-1" style="font-size: 2rem;">%</span>
                 </div>
               </div>
               <div class="pb-2">
-                <input type="range" id="fan-speed-slider" class="custom-fan-slider w-100" min="0" max="100" value="0">
+                <input type="range" id="fan-speed-slider" class="custom-fan-slider w-100" min="0" max="100" step="1"
+                  value="0">
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-body">
+              <h5 class="mb-3 fw-500 text-muted">Fan Control Mode</h5>
+              <div class="d-flex gap-2">
+                <button type="button" id="fan-control-mode-btn" class="btn btn-primary flex-grow-1" data-mode="percent"
+                  style="font-weight: bold;">Percentage</button>
+                <button type="button" id="emergency-stop-btn" class="btn btn-danger"
+                  style="font-weight: bold; min-width: 120px;">
+                  STOP
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="card d-none" id="pid-status-row">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0 fw-500 text-muted">PID Status</h5>
+                <span id="pid-state-display" class="badge bg-warning text-dark">Wind-up</span>
+              </div>
+              <div class="d-flex flex-column gap-3">
+                <h4 class="mb-0">Setpoint: <span id="pid-setpoint-display">-</span></h4>
+                <h4 class="mb-0">Output: <span id="pid-output-display">-</span></h4>
               </div>
             </div>
           </div>
@@ -236,38 +267,45 @@
             <div class="card-body">
               <div class="d-flex flex-column gap-2">
                 <div class="d-flex align-items-center justify-content-between gap-3">
-                  <label for="kp-value" class="mb-0">Proportional Constant (Kp):</label>
+                  <label for="kp-value" class="mb-0 flex-grow-1">Proportional Constant (Kp):</label>
                   <div class="d-flex align-items-center gap-2">
                     <small class="text-muted">current: <span id="kp-current">—</span></small>
                     <input type="number" class="form-control" id="kp-value" style="width: 100px;">
                   </div>
                 </div>
                 <div class="d-flex align-items-center justify-content-between gap-3">
-                  <label for="ki-value" class="mb-0">Integral Constant (Ki):</label>
+                  <label for="ki-value" class="mb-0 flex-grow-1">Integral Constant (Ki):</label>
                   <div class="d-flex align-items-center gap-2">
                     <small class="text-muted">current: <span id="ki-current">—</span></small>
                     <input type="number" class="form-control" id="ki-value" style="width: 100px;">
                   </div>
                 </div>
                 <div class="d-flex align-items-center justify-content-between gap-3">
-                  <label for="kd-value" class="mb-0">Derivative Constant (Kd):</label>
+                  <label for="kd-value" class="mb-0 flex-grow-1">Derivative Constant (Kd):</label>
                   <div class="d-flex align-items-center gap-2">
                     <small class="text-muted">current: <span id="kd-current">—</span></small>
                     <input type="number" class="form-control" id="kd-value" style="width: 100px;">
                   </div>
                 </div>
                 <div class="d-flex align-items-center justify-content-between gap-3">
-                  <label for="shunt-value" class="mb-0">Shunt value (in Ohms):</label>
+                  <label for="kt-value" class="mb-0 flex-grow-1">Anti-windup Tracking Gain (Kt):</label>
                   <div class="d-flex align-items-center gap-2">
-                    <small class="text-muted">current: <span id="shunt-current">—</span></small>
-                    <input type="number" class="form-control" id="shunt-value" style="width: 100px;">
+                    <small class="text-muted">current: <span id="kt-current">—</span></small>
+                    <input type="number" class="form-control" id="kt-value" style="width: 100px;">
                   </div>
                 </div>
                 <div class="d-flex align-items-center justify-content-between gap-3">
-                  <label for="density-value" class="mb-0">Air density (in kg/m³):</label>
+                  <label for="tf-value" class="mb-0 flex-grow-1">Derivative Filter Time (Tf):</label>
                   <div class="d-flex align-items-center gap-2">
-                    <small class="text-muted">current: <span id="density-current">—</span></small>
-                    <input type="number" class="form-control" id="density-value" style="width: 100px;">
+                    <small class="text-muted">current: <span id="tf-current">—</span></small>
+                    <input type="number" class="form-control" id="tf-value" step="0.01" style="width: 100px;">
+                  </div>
+                </div>
+                <div class="d-flex align-items-center justify-content-between gap-3">
+                  <label for="shunt-value" class="mb-0 flex-grow-1">Shunt value (in Ohms):</label>
+                  <div class="d-flex align-items-center gap-2">
+                    <small class="text-muted">current: <span id="shunt-current">—</span></small>
+                    <input type="number" class="form-control" id="shunt-value" style="width: 100px;">
                   </div>
                 </div>
               </div>
@@ -285,6 +323,11 @@
                 <button type="button" class="btn btn-primary w-100" id="reset-dps">Reset DPS</button>
                 <button type="button" class="btn btn-outline-secondary w-100 mt-2" id="send-test">Send test
                   signal</button>
+                <button type="button" class="btn btn-outline-dark w-100 mt-2" id="dimmer-curve-mode-btn"
+                  data-mode="unknown">Dimmer curve: UNKNOWN</button>
+                <button type="button" class="btn btn-outline-warning w-100 mt-2" id="recalibrate-dimmerlink-btn">
+                  <i class="ti ti-refresh me-1"></i>Recalibrate Dimmerlink
+                </button>
               </div>
             </div>
           </div>

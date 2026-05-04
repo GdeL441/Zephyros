@@ -24,9 +24,21 @@ _REG_LEVEL   = 0x10
 _REG_CURVE   = 0x11
 _REG_FREQ    = 0x20
 
-_DIMMER_READ_INTERVAL_S = 0.1
-_DIMMER_MAX_FAILURES    = 3
-_I2C_LOCK_TIMEOUT       = 50
+# Command codes (write to _REG_COMMAND)
+_CMD_SOFT_RESET   = 0x01
+_CMD_RECALIBRATE  = 0x02
+
+# Curve register values
+_CURVE_LINEAR = 0
+_CURVE_RMS    = 1
+_CURVE_LOG    = 2
+_CURVE_CODE_TO_NAME = {0: "linear", 1: "rms", 2: "log"}
+_CURVE_NAME_TO_CODE = {"linear": 0, "rms": 1, "log": 2}
+
+_DIMMER_READ_INTERVAL_S       = 0.1
+_DIMMER_CURVE_POLL_INTERVAL_S = 2.0   # Curve register re-sync cadence
+_DIMMER_MAX_FAILURES          = 3
+_I2C_LOCK_TIMEOUT             = 50
 
 # Helper to decode opaque CircuitPython OSErrors
 def _decode_i2c_error(e: OSError) -> str:
@@ -57,13 +69,57 @@ _last_percent_poll_s        = 0.0
 _last_known_dimmer_percent  = 0
 _consecutive_write_failures = 0
 _speed_event                = asyncio.Event()
+fan_control_mode            = "percent"  # "percent" (default) or "pid"
 
-def set_target_fan_speed(percent: int) -> None:
+# Last known dimmer curve mode ("linear" | "rms" | "log" | "unknown").
+# Updated on successful writes and on periodic readback.
+dimmer_curve_mode           = "unknown"
+_last_curve_poll_s          = 0.0
+
+# ── PID controller state ──────────────────────────────────────────────────────
+# Matches block diagram: e = r - y through Kp, Ki (with anti-windup Kt),
+# and -y through low-pass filter (1/(1+sTf)) then Kd*s for derivative.
+_DIMMER_MIN_PERCENT   = 40    # Minimum dimmer output (TRIAC can't fire below this)
+_PID_WINDUP_DURATION  = 5.0   # Seconds to ramp from 0 → 75% on PID start
+_PID_WINDUP_LEVEL     = 75    # Target level during wind-up phase
+_PID_OUTPUT_MIN       = 40    # Clamp: actuator lower bound (%)
+_PID_OUTPUT_MAX       = 100   # Clamp: actuator upper bound (%)
+_PID_DT               = 0.05  # Controller sample period (20 Hz)
+
+
+# Runtime PID variables (reset on mode switch)
+_pid_target_airspeed  = 0.0   # Setpoint r (m/s)
+_pid_integral         = 0.0   # Integrator state
+_pid_prev_y_filt      = 0.0   # Previous filtered measurement (for derivative)
+_pid_windup_start     = 0.0   # monotonic time when PID mode was entered
+_pid_active           = False # True once wind-up is complete and loop is running
+_pid_output           = 0.0   # Last computed controller output (for telemetry)
+_pid_prev_d_filt      = 0.0   # Last filtered derivative of -y
+
+def set_target_fan_speed(percent: float) -> None:
     global target_fan_speed, current_fan_speed
-    percent = max(0, min(100, int(percent)))
+    percent = max(0.0, float(percent))
     target_fan_speed      = percent
     current_fan_speed     = percent
     _speed_event.set()
+
+def set_pid_setpoint(airspeed_ms: float) -> None:
+    """Set the PID target airspeed (m/s). Only effective when fan_control_mode == 'pid'."""
+    global _pid_target_airspeed, _pid_active, _pid_windup_start
+    global _pid_integral, _pid_prev_y_filt, _pid_prev_d_filt, _pid_output
+    new_setpoint = max(0.0, float(airspeed_ms))
+    # Coming out of a zero setpoint while in PID mode → re-arm wind-up so the
+    # loop ramps in smoothly instead of starting cold against the output clamp.
+    if fan_control_mode == "pid" and _pid_target_airspeed <= 0 and new_setpoint > 0:
+        _pid_active       = False
+        _pid_integral     = 0.0
+        _pid_prev_y_filt  = 0.0
+        _pid_prev_d_filt  = 0.0
+        _pid_output       = 0.0
+        _pid_windup_start = time.monotonic()
+        print("PID: setpoint 0 → non-zero, restarting wind-up")
+    _pid_target_airspeed = new_setpoint
+    print(f"PID: setpoint = {_pid_target_airspeed:.2f} m/s")
 
 # ── DimmerLink I2C helpers ────────────────────────────────────────────────────
 
@@ -165,6 +221,122 @@ async def dimmer_updater() -> None:
                     print("DimmerLink: reinit failed — backing off 2s")
                     await asyncio.sleep(2.0)
 
+# ── PID controller background task ───────────────────────────────────────────
+
+def _pid_reset() -> None:
+    """Zero all PID integrator / filter state for a clean start."""
+    global _pid_integral, _pid_prev_y_filt, _pid_active, _pid_output, _pid_prev_d_filt
+    global _pid_windup_start, _pid_target_airspeed
+    _pid_integral       = 0.0
+    _pid_prev_y_filt    = 0.0
+    _pid_active         = False
+    _pid_output         = 0.0
+    _pid_windup_start   = time.monotonic()
+    _pid_prev_d_filt    = 0.0
+    _pid_target_airspeed = 5.0  # Default to 5 m/s on PID entry
+    print("PID: state reset (setpoint = 5.0 m/s)")
+
+def _switch_to_pid() -> None:
+    """Safely enter PID mode: reset state and begin wind-up."""
+    global fan_control_mode
+    _pid_reset()
+    fan_control_mode = "pid"
+    print("PID: entering PID mode — wind-up phase starting")
+
+def _switch_to_percent() -> None:
+    """Safely leave PID mode: stop PID, set dimmer to 0%, return to percent."""
+    global fan_control_mode, _pid_active
+    _pid_active = False
+    fan_control_mode = "percent"
+    set_target_fan_speed(0)
+    print("PID: switched to percent mode — fan set to 0%")
+
+async def pid_controller() -> None:
+    """PID control loop running at 1/_PID_DT Hz.
+
+    Block diagram implementation:
+      e = r - y                        (error)
+      v = Kp*e + integral + Kd*d_filt  (unsaturated output)
+      u = clamp(v, min, max)            (actuator output)
+      es = u - v                        (saturation error)
+      integral += (Ki*e + Kt*es) * dt   (anti-windup back-calculation)
+      d_filt: -y through 1st-order LPF, then finite-difference derivative
+    """
+    global _pid_integral, _pid_prev_y_filt, _pid_active, _pid_output, _pid_prev_d_filt
+    
+    await asyncio.sleep(1.0)  # Let other tasks settle
+    last_time = time.monotonic()
+    while True:
+        await asyncio.sleep(_PID_DT)
+        now = time.monotonic()
+        actual_dt = now - last_time
+        last_time = now
+
+        if fan_control_mode != "pid":
+            continue
+
+        # ── Wind-up phase: hold at 75% for 5 s before engaging the loop ──
+        elapsed = time.monotonic() - _pid_windup_start
+        if not _pid_active:
+            if elapsed < _PID_WINDUP_DURATION:
+                # Hold at _PID_WINDUP_LEVEL for the full duration
+                set_target_fan_speed(_PID_WINDUP_LEVEL)
+                _pid_output = _PID_WINDUP_LEVEL
+                continue
+            else:
+                # Wind-up complete — seed the integrator so the loop starts
+                # smoothly from the current operating point.
+                _pid_active = True
+                _pid_integral = _PID_WINDUP_LEVEL  # pre-load integrator
+                _pid_prev_y_filt = smoothed_airspeed_ms
+                print(f"PID: wind-up complete, loop active (seeded at {_PID_WINDUP_LEVEL}%)")
+
+        # ── Measurement ───────────────────────────────────────────────
+        r  = _pid_target_airspeed      # setpoint (m/s)
+        y  = smoothed_airspeed_ms      # measured airspeed (m/s)
+        dt = actual_dt
+        if dt <= 0.001: 
+            continue # Prevent division by zero
+
+        # ── Setpoint 0 m/s → turn fan off (bypass minimum) ────────────
+        if r <= 0:
+            _pid_output = 0.0
+            _pid_integral = 0.0
+            set_target_fan_speed(0)
+            continue
+
+        # ── Error ─────────────────────────────────────────────────────
+        e = r - y
+
+        # ── Derivative on measurement (-y) with low-pass filter ──────
+        # Calculate raw derivative of -y
+        raw_d = -(y - _pid_prev_y_filt) / dt
+        
+        # Apply low-pass filter to the derivative
+        alpha = dt / (Tf + dt) if Tf > 0 else 1.0
+        d_filt = alpha * raw_d + (1.0 - alpha) * _pid_prev_d_filt
+        
+        # Save states for next loop
+        _pid_prev_y_filt = y
+        _pid_prev_d_filt = d_filt
+        
+        # ── PID terms ─────────────────────────────────────────────────
+        P = Kp * e
+        D = Kd * d_filt
+        v = P + _pid_integral + D       # unsaturated output
+
+        # ── Actuator saturation (clamp) ──────────────────────────────
+        u = max(_PID_OUTPUT_MIN, min(_PID_OUTPUT_MAX, v))
+
+        # ── Anti-windup: back-calculation ─────────────────────────────
+        es = u - v  # saturation error
+        _pid_integral += (Ki * e + Kt * es) * dt
+
+        # ── Apply output ──────────────────────────────────────────────
+        _pid_output = u
+        set_target_fan_speed(int(u))
+
+
 async def get_dimmer_percent() -> int:
     global _last_percent_poll_s, _last_known_dimmer_percent
 
@@ -184,11 +356,42 @@ async def get_dimmer_percent() -> int:
     _last_percent_poll_s = now
     return _last_known_dimmer_percent
 
-async def calibrate_dimmerlink():
-    pass
+async def _dimmer_set_curve(mode: str) -> bool:
+    """Write the curve register (0x11). mode ∈ {linear, rms, log}."""
+    global dimmer_curve_mode
+    code = _CURVE_NAME_TO_CODE.get(mode)
+    if code is None:
+        print(f"DimmerLink: unknown curve mode {mode!r}")
+        return False
+    ok = await _dimmer_write_reg(_REG_CURVE, code)
+    if ok:
+        dimmer_curve_mode = mode
+        print(f"DimmerLink: curve set to {mode}")
+    return ok
 
-async def reset_dimmerlink():
-    pass    
+async def _dimmer_read_curve_cached() -> str:
+    """Return the cached dimmer curve mode, refreshing from the chip every
+    _DIMMER_CURVE_POLL_INTERVAL_S seconds. Read failures keep the last value."""
+    global dimmer_curve_mode, _last_curve_poll_s
+    now = time.monotonic()
+    if (now - _last_curve_poll_s) < _DIMMER_CURVE_POLL_INTERVAL_S:
+        return dimmer_curve_mode
+    _last_curve_poll_s = now
+    val = await _dimmer_read_reg(_REG_CURVE)
+    if val is not None:
+        dimmer_curve_mode = _CURVE_CODE_TO_NAME.get(val, "unknown")
+    return dimmer_curve_mode
+
+async def recalibrate_dimmerlink() -> bool:
+    """Ask DimmerLink to re-measure the mains AC frequency (cmd 0x02)."""
+    print("DimmerLink: triggering recalibration")
+    return await _dimmer_write_reg(_REG_COMMAND, _CMD_RECALIBRATE)
+
+async def reset_dimmerlink() -> bool:
+    """Soft-reset the DimmerLink controller (cmd 0x01)."""
+    print("DimmerLink: triggering soft reset")
+    return await _dimmer_write_reg(_REG_COMMAND, _CMD_SOFT_RESET)
+
 
 # ── I2C & SDP810 setup ────────────────────────────────────────────────────────
 try:
@@ -284,13 +487,16 @@ async def adc_sampler():
 shunt_value = 4700 # Ohms
 R_SPECIFIC = 287.05
 smoothed_airspeed_ms = 0
+_AIRSPEED_ALPHA      = 0.30   # EMA smoothing for airspeed (lower = smoother)
 current_temperate = 15
 current_pressure = 101325
 air_density = current_pressure / (R_SPECIFIC * (current_temperate + 273.15))
 
-Kp = 0
-Ki = 0
-Kd = 0
+Kp = 15.0   # Proportional gain
+Ki = 4.0    # Integral gain
+Kd = 0.5    # Derivative gain
+Kt = 1.2    # Anti-windup tracking gain
+Tf = 0.1    # Derivative filter time constant (seconds)
 
 SSID = "Zephyros"
 PASSWORD = "password"
@@ -342,7 +548,7 @@ def _on_websocket_disconnect():
     print("Fan set to 0% (WebSocket disconnected)")
 
 async def handle_websocket_message(message):
-    global Kp, Ki, Kd, shunt_value, air_density, current_fan_speed
+    global Kp, Ki, Kd, Kt, Tf, shunt_value, current_fan_speed, fan_control_mode
     try:
         data = json.loads(message)
         print(data)
@@ -356,25 +562,40 @@ async def handle_websocket_message(message):
             await send_current_settings()
         elif data.get('action') == 'set_fan_speed':
             speed = data.get('speed', current_fan_speed)
-            current_fan_speed = speed
-            set_target_fan_speed(speed)
+            if fan_control_mode == "pid":
+                # In PID mode, the slider sets airspeed setpoint (m/s)
+                set_pid_setpoint(speed)
+            else:
+                current_fan_speed = speed
+                set_target_fan_speed(speed)
         elif data.get('action') == "send_data":
             await send_plotting_data()
+        elif data.get('action') == 'percent_mode':
+            _switch_to_percent()
+        elif data.get('action') == 'pid_mode':
+            _switch_to_pid()
+        elif data.get('action') == 'emergency_stop':
+            _switch_to_percent()  # kills PID, sets fan to 0%
+            print("EMERGENCY STOP — fan immediately set to 0%")
         elif data.get('action') == 'new_settings':
             Kp = data.get('Kp', Kp)
             Ki = data.get('Ki', Ki)
             Kd = data.get('Kd', Kd)
+            Kt = data.get('Kt', Kt)
+            Tf = data.get('Tf', Tf)
             shunt_value = data.get('shunt_value', shunt_value)
-            air_density = data.get('air_density', air_density)
             await asyncio.sleep(0.1)
             await send_current_settings()
         elif data.get('action') == 'reset_dimmerlink':
             await reset_dimmerlink()
-        elif data.get('action') == 'calibrate_dimmerlink':
-            await calibrate_dimmerlink()
+        elif data.get('action') in ('recalibrate_dimmerlink', 'calibrate_dimmerlink'):
+            await recalibrate_dimmerlink()
+        elif data.get('action') == 'set_dimmer_curve':
+            mode = data.get('mode')
+            await _dimmer_set_curve(mode)
         else:
             print("Unknown action:", data.get('action'))
-            
+
 
     except Exception as e:
         print("Error handling WebSocket message:", e)
@@ -396,20 +617,36 @@ async def send_websocket_message(data, important=False):
         _on_websocket_disconnect()
         return False
 
+def _ws_receive(ws):
+    """Non-blocking WebSocket receive that tolerates older lib versions
+    where receive() raises RuntimeError on no data instead of returning None."""
+    try:
+        return ws.receive(fail_silently=True)
+    except TypeError:
+        try:
+            return ws.receive()
+        except (RuntimeError, OSError):
+            return None
+
 async def handle_websockets():
     global current_websocket
     while True:
         if current_websocket is not None:
+            ws = current_websocket
             try:
-                data = current_websocket.receive()
-                if data:
+                # Drain pending frames each pass so rapid clicks aren't lost
+                for _ in range(8):
+                    data = _ws_receive(ws)
+                    if not data:
+                        break
                     await handle_websocket_message(data)
-            except Exception as e:
-                print(f"WebSocket error: {e}")
-                current_websocket = None
+            except (ConnectionError, OSError) as e:
+                print(f"WebSocket dropped: {e}")
+                if current_websocket is ws:
+                    current_websocket = None
                 _on_websocket_disconnect()
                 asyncio.create_task(blink(3, on_time=0.05, off_time=0.05))
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
 
 async def run_server():
     server.start(str(wifi.radio.ipv4_address_ap), PORT)
@@ -427,14 +664,23 @@ async def sensor_broadcaster():
             voltage = smoothed_voltage
             power_mw = (voltage ** 2 / shunt_value) * 1000 if shunt_value else 0
             telemetry = {
-                "type":       "telemetry",
-                "voltage":    round(voltage, 4),
-                "resistance": shunt_value,
-                "power":      round(power_mw, 4),
-                "air_speed":  smoothed_airspeed_ms,
-                "fan_speed":  await get_dimmer_percent(),
-                "uptime":     time.monotonic(),
+                "type":              "telemetry",
+                "voltage":           round(voltage, 4),
+                "resistance":        shunt_value,
+                "power":             round(power_mw, 4),
+                "air_speed":         smoothed_airspeed_ms,
+                "fan_speed":         await get_dimmer_percent(),
+                "uptime":            time.monotonic(),
+                "fan_mode":          fan_control_mode,
+                "temperature":       round(current_temperate, 2),
+                "air_density":       round(air_density, 4),
+                "dimmer_curve_mode": await _dimmer_read_curve_cached(),
             }
+            # Add PID-specific telemetry when in PID mode
+            if fan_control_mode == "pid":
+                telemetry["pid_setpoint"]  = round(_pid_target_airspeed, 2)
+                telemetry["pid_output"]    = round(_pid_output, 1)
+                telemetry["pid_active"]    = _pid_active
             await send_websocket_message(telemetry)
         await asyncio.sleep(0.1)
 
@@ -445,8 +691,9 @@ async def send_current_settings():
             "Kp":             Kp,
             "Ki":             Ki,
             "Kd":             Kd,
+            "Kt":             Kt,
+            "Tf":             Tf,
             "shunt_value":    shunt_value,
-            "air_density":    air_density,
         }
         await send_websocket_message(settings)
 
@@ -469,9 +716,12 @@ async def measure_airspeed():
                 current_temperate = temperature_c
                 air_density = current_pressure / (R_SPECIFIC * (temperature_c + 273.15))
                 if pressure_pa <= 0:
-                    smoothed_airspeed_ms = -1 * math.sqrt((2.0 * abs(pressure_pa)) / air_density)
+                    raw_airspeed = -1 * math.sqrt((2.0 * abs(pressure_pa)) / air_density)
                 else:
-                    smoothed_airspeed_ms = math.sqrt((2.0 * pressure_pa) / air_density)
+                    raw_airspeed = math.sqrt((2.0 * pressure_pa) / air_density)
+                # EMA smoothing for stable display and PID feedback
+                smoothed_airspeed_ms = (_AIRSPEED_ALPHA * raw_airspeed
+                                        + (1 - _AIRSPEED_ALPHA) * smoothed_airspeed_ms)
             except ValueError as e:
                 print(f"SDP810 read error (skipping frame): {e}")
             except OSError as e:
@@ -489,6 +739,7 @@ async def main():
         sensor_broadcaster(),
         dimmer_updater(),
         adc_sampler(),
+        pid_controller(),
     )
 
 asyncio.run(main())

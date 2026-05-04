@@ -151,6 +151,8 @@
 #kp-current,
 #ki-current,
 #kd-current,
+#kt-current,
+#tf-current,
 #shunt-current,
 #density-current {
   font-family: 'Courier New', Courier, monospace;
