@@ -38,16 +38,13 @@ jobs:
         with:
           workspaces: control-app/src-tauri
 
-      - uses: pnpm/action-setup@v4
-        with: { version: 10 }
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-          cache-dependency-path: control-app/pnpm-lock.yaml
+          cache: npm
+          cache-dependency-path: control-app/package-lock.json
 
-      - run: pnpm install --frozen-lockfile
+      - run: npm ci
 
       - name: Build & upload to a draft release
         uses: tauri-apps/tauri-action@v0
