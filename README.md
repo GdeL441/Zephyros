@@ -4,7 +4,7 @@ Code for control software for a windtunnel. (Made for P&O 2 at KU Leuven)
 ## macOS install guide:
 1. Download the correct installer from the releases (Apple Silicon or Intel)
 2. Drag the app into the Applications folder
-3. Run this code: `sudo xattr -dr com.apple.quarantine '/Applications/Zephyros Control App.app'`
+3. Run this in the terminal: `sudo xattr -dr com.apple.quarantine '/Applications/Zephyros Control App.app'`
 4. Enjoy
 
 ## Building instructions:
