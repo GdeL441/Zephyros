@@ -487,7 +487,7 @@ async def adc_sampler():
         await asyncio.sleep(0.05)     # 20 Hz
 
 # ── Air data ──────────────────────────────────────────────────────────────────
-shunt_value = 4700 # Ohms
+shunt_value = 100 # Ohms
 R_SPECIFIC = 287.05
 smoothed_airspeed_ms = 0.0
 # Light EMA only — the SDP810 is already in averaged mode and the PID's
