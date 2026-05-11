@@ -3,7 +3,7 @@
 <!-- [Head] start -->
 
 <head>
-  <title>Home | Zephyros</title>
+  <title>MECH2A2 Wind Tunnel Controller</title>
   <!-- [Meta] -->
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=0">
@@ -122,17 +122,15 @@
         <!-- Left column -->
         <div class="col-md-12 col-xl-8 d-flex flex-column">
 
-          <div class="card flex-grow-1" style="margin-bottom: 0; height: 550px;" id="graph-card">
+          <div class="card flex-grow-1" style="margin-bottom: 0; min-height: 550px;" id="graph-card">
             <div class="card-body d-flex flex-column h-100">
               <!-- Graph toolbar -->
-              <div class="d-flex justify-content-between align-items-center mb-3">
+              <div class="graph-toolbar mb-3">
                 <h6 class="mb-0 f-w-400 text-muted" id="graph-title">Power vs Airspeed</h6>
-                <div class="d-flex gap-2 align-items-center">
-                  <div class="d-flex align-items-center gap-1">
-                    <label for="pitch-angle-select" class="mb-0 text-muted"
-                      style="font-size: 0.78rem; font-weight: 500; white-space: nowrap;">Pitch:</label>
-                    <select class="form-select form-select-sm" id="pitch-angle-select"
-                      style="width: auto; min-width: 70px;">
+                <div class="graph-toolbar-controls">
+                  <div class="graph-toolbar-group">
+                    <label for="pitch-angle-select" class="graph-toolbar-label">Pitch:</label>
+                    <select class="form-select form-select-sm graph-toolbar-control" id="pitch-angle-select">
                       <option value="0">0°</option>
                       <option value="12">12°</option>
                       <option value="24">24°</option>
@@ -145,37 +143,92 @@
                       <option value="108">108°</option>
                     </select>
                   </div>
-                  <button type="button" class="btn btn-success btn-sm" id="graph-toggle-btn" data-graphing="false">
-                    <i class="ti ti-player-play me-1"></i><span id="graph-toggle-text">Start Graphing</span>
-                  </button>
-                  <button type="button" class="btn btn-outline-secondary btn-sm" id="graph-clear-btn"
+                  <button type="button" class="btn btn-outline-secondary btn-sm graph-toolbar-control" id="graph-clear-btn"
                     title="Clear graph data">
                     <i class="ti ti-trash"></i>
                   </button>
-                  <button type="button" class="btn btn-outline-primary btn-sm" id="graph-export-btn"
+                  <button type="button" class="btn btn-outline-primary btn-sm graph-toolbar-control" id="graph-import-btn"
+                    title="Import data from a previously exported CSV">
+                    <i class="ti ti-upload me-1"></i>Load CSV
+                  </button>
+                  <button type="button" class="btn btn-outline-primary btn-sm graph-toolbar-control" id="graph-export-btn"
                     title="Export as CSV">
-                    <i class="ti ti-download me-1"></i>CSV
+                    <i class="ti ti-download me-1"></i>Save CSV
                   </button>
                 </div>
               </div>
               <!-- Canvas container -->
               <div class="graph-canvas-wrap flex-grow-1 position-relative">
                 <canvas id="graph-canvas"></canvas>
-                <button type="button" class="btn btn-primary" id="graph-send-data-btn"
-                  title="Request current power data">
-                  <i class="ti ti-send me-1"></i>Send Data
-                </button>
                 <div class="graph-no-data-overlay" id="graph-no-data">
                   <div class="text-center text-muted">
                     <i class="ti ti-chart-dots" style="font-size: 2.5rem; opacity: 0.3;"></i>
-                    <p class="mb-0 mt-2" style="font-size: 0.85rem;">Select a pitch angle and press <strong>Start
-                        Graphing</strong> to begin</p>
+                    <p class="mb-0 mt-2" style="font-size: 0.85rem;">Pick a pitch angle, then press
+                      <strong>Graph Point</strong> or enable <strong>Auto</strong> to start collecting.</p>
                   </div>
                 </div>
               </div>
-              <!-- 0 tot 90 in stapjes van 12 -->
-              <div class="graph-legend mt-2" id="graph-legend">
-                <!-- Legend chips inserted by JS -->
+              <!-- Bottom bar: legend chips on the left, capture cluster on
+                   the right — single flex row so chips and buttons share
+                   the same vertical baseline. -->
+              <div class="graph-bottom-bar mt-3">
+                <div class="graph-legend" id="graph-legend">
+                  <!-- Legend chips inserted by JS -->
+                </div>
+                <div class="graph-capture-cluster" id="graph-capture-cluster">
+                  <div class="graph-toolbar-group">
+                    <label for="graph-auto-interval" class="graph-toolbar-label">Auto every:</label>
+                    <input type="number" class="form-control form-control-sm graph-toolbar-control graph-toolbar-number"
+                      id="graph-auto-interval" min="0.1" step="0.1" value="1.0">
+                    <span class="graph-toolbar-label">s</span>
+                  </div>
+                  <button type="button" class="btn btn-success btn-sm graph-toolbar-control" id="graph-auto-btn"
+                    data-auto="false" title="Capture a point every N seconds">
+                    <i class="ti ti-player-play me-1"></i><span id="graph-auto-text">Start Auto</span>
+                  </button>
+                  <button type="button" class="btn btn-primary btn-sm graph-toolbar-control" id="graph-point-btn"
+                    title="Capture the latest airspeed/power telemetry as a graph point">
+                    Graph Point
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Fan slider + PID status row (under the graph, horizontal) -->
+          <div class="row g-3 mt-1" id="fan-pid-row">
+            <div class="col-md-7">
+              <div class="card h-100" style="margin-bottom: 0;">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h5 class="mb-3 fw-500 text-muted">Fan Speed Control</h5>
+                    <div class="d-flex align-items-baseline">
+                      <span id="fan-speed-value" class="fw-bold text-primary" contenteditable="true"
+                        style="font-size: 3rem; line-height: 1; text-shadow: 0 4px 12px rgba(70,128,255,0.25); outline: none; min-width: 1.5ch; display: inline-block; text-align: right; border-radius: 8px; transition: background 0.2s; cursor: text; padding: 0.1em 0.2em; margin-left: -0.2em;"
+                        onfocus="this.style.background='rgba(70,128,255,0.1)'"
+                        onblur="this.style.background='transparent'">0</span>
+                      <span id="fan-speed-unit" class="fw-bold text-muted ms-1" style="font-size: 2rem;">%</span>
+                    </div>
+                  </div>
+                  <div class="pb-2">
+                    <input type="range" id="fan-speed-slider" class="custom-fan-slider w-100" min="0" max="100" step="1"
+                      value="0">
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-md-5">
+              <div class="card h-100" style="margin-bottom: 0;" id="pid-status-row">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="mb-0 fw-500 text-muted">PID Status</h5>
+                    <span id="pid-state-display" class="badge bg-secondary text-white">Inactive</span>
+                  </div>
+                  <div class="d-flex flex-column gap-3">
+                    <h4 class="mb-0">Setpoint: <span id="pid-setpoint-display">-</span></h4>
+                    <h4 class="mb-0">Output: <span id="pid-output-display">-</span></h4>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -206,24 +259,6 @@
           </div>
           <div class="card">
             <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center mb-4">
-                <h5 class="mb-3 fw-500 text-muted">Fan Speed Control</h5>
-                <div class="d-flex align-items-baseline">
-                  <span id="fan-speed-value" class="fw-bold text-primary" contenteditable="true"
-                    style="font-size: 3rem; line-height: 1; text-shadow: 0 4px 12px rgba(70,128,255,0.25); outline: none; min-width: 1.5ch; display: inline-block; text-align: right; border-radius: 8px; transition: background 0.2s; cursor: text; padding: 0.1em 0.2em; margin-left: -0.2em;"
-                    onfocus="this.style.background='rgba(70,128,255,0.1)'"
-                    onblur="this.style.background='transparent'">0</span>
-                  <span id="fan-speed-unit" class="fw-bold text-muted ms-1" style="font-size: 2rem;">%</span>
-                </div>
-              </div>
-              <div class="pb-2">
-                <input type="range" id="fan-speed-slider" class="custom-fan-slider w-100" min="0" max="100" step="1"
-                  value="0">
-              </div>
-            </div>
-          </div>
-          <div class="card">
-            <div class="card-body">
               <h5 class="mb-3 fw-500 text-muted">Fan Control Mode</h5>
               <div class="d-flex gap-2">
                 <button type="button" id="fan-control-mode-btn" class="btn btn-primary flex-grow-1" data-mode="percent"
@@ -232,18 +267,6 @@
                   style="font-weight: bold; min-width: 120px;">
                   STOP
                 </button>
-              </div>
-            </div>
-          </div>
-          <div class="card d-none" id="pid-status-row">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center mb-3">
-                <h5 class="mb-0 fw-500 text-muted">PID Status</h5>
-                <span id="pid-state-display" class="badge bg-warning text-dark">Wind-up</span>
-              </div>
-              <div class="d-flex flex-column gap-3">
-                <h4 class="mb-0">Setpoint: <span id="pid-setpoint-display">-</span></h4>
-                <h4 class="mb-0">Output: <span id="pid-output-display">-</span></h4>
               </div>
             </div>
           </div>
@@ -412,7 +435,7 @@
     <div class="footer-wrapper container-fluid">
       <div class="row">
         <div class="col-sm my-1">
-          <p class="m-0">Zephyros Control Software crafted by Mech2A2. View us on <a
+          <p class="m-0">MECH2A2 Wind Tunnel Controller crafted by Mech2A2. View us on <a
               href="https://github.com/GdeL441/zephyros" target="_blank">GitHub</a></p>
         </div>
       </div>
@@ -420,6 +443,9 @@
   </footer>
 
 
+
+  <!-- Toast notification container (top-right) -->
+  <div id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
   <script src="assets/js/pcoded.js"></script>
 

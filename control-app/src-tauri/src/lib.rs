@@ -85,7 +85,7 @@ fn scan() -> Result<Vec<String>, String> {
     if ssids.is_empty() {
         return Err(
             "macOS hides Wi-Fi SSIDs from apps without Location Services \
-             permission. As a workaround, connect to the Pico's \"Zephyros\" \
+             permission. As a workaround, connect to the Pico's \"Team MECH2A2\" \
              access point from the macOS menu-bar Wi-Fi menu, then click \
              \"Open WebSocket Connection\" — no in-app scan is needed."
                 .to_string(),
@@ -190,6 +190,33 @@ async fn save_csv(app: tauri::AppHandle, csv_content: String, default_name: Stri
     }
 }
 
+#[derive(serde::Serialize)]
+struct LoadedCsv {
+    path: String,
+    content: String,
+}
+
+#[tauri::command]
+async fn load_csv(app: tauri::AppHandle) -> Result<Option<LoadedCsv>, String> {
+    let file_path = app.dialog()
+        .file()
+        .add_filter("CSV", &["csv"])
+        .blocking_pick_file();
+
+    match file_path {
+        Some(path) => {
+            let path_buf = path.as_path().ok_or("Selected file has no local path")?.to_path_buf();
+            let content = std::fs::read_to_string(&path_buf)
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+            Ok(Some(LoadedCsv {
+                path: path_buf.display().to_string(),
+                content,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 
 #[derive(Clone, Debug)]
 struct AppData {
@@ -217,6 +244,7 @@ pub fn run() {
             connect,
             get_url,
             save_csv,
+            load_csv,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]

@@ -31,6 +31,15 @@
   color: #dc3545 !important;
 }
 
+.text-white {
+  color: #fff !important;
+}
+
+#pid-state-display {
+  font-size: 0.95rem;
+  padding: 0.45em 0.8em;
+}
+
 /* Fan Speed Panel */
 .fan-speed-panel {
   display: flex;
@@ -234,26 +243,144 @@
   height: 100%;
 }
 
-#graph-send-data-btn {
-  position: absolute;
-  bottom: 20px;
-  right: 20px;
-  z-index: 10;
-  display: none;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  border-radius: 8px;
-  padding: 8px 16px;
-  transition: all 0.2s ease;
-}
-
-#graph-send-data-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
-}
-
-#graph-send-data-btn.visible {
-  display: flex !important;
+/* Shared toolbar styling — used by both the top toolbar and the bottom
+   capture cluster so labels, inputs, selects, and buttons line up on the
+   same baseline at the same height. */
+.graph-toolbar {
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.graph-toolbar-controls,
+.graph-capture-cluster {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.graph-capture-cluster { justify-content: flex-end; }
+
+.graph-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.graph-toolbar-label {
+  margin-bottom: 0;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #6c757d;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+/* Normalise every interactive control on the toolbar/cluster rows to the
+   same Bootstrap btn-sm height so the form-select and the buttons share a
+   baseline. Bootstrap's btn-sm has line-height:1.5 + 0.25rem y-padding +
+   1px border on each side ≈ 31px; the form-select-sm renders ~33px because
+   of slightly different padding, hence the explicit min-height here. */
+.graph-toolbar-control {
+  min-height: 31px;
+  display: inline-flex;
+  align-items: center;
+}
+
+select.graph-toolbar-control {
+  width: auto;
+  min-width: 78px;
+  padding-top: 0.15rem;
+  padding-bottom: 0.15rem;
+  padding-right: 1.75rem; /* keep room for the dropdown caret */
+}
+
+input.graph-toolbar-control {
+  padding-top: 0.15rem;
+  padding-bottom: 0.15rem;
+}
+
+.graph-toolbar-number {
+  width: 76px;
+}
+
+/* Subtle click feedback — brief shift toward a lighter, whiter blue */
+#graph-point-btn.collected {
+  animation: collect-subtle 0.32s ease-out;
+}
+
+@keyframes collect-subtle {
+  0%   { background-color: var(--bs-primary, #4680ff); }
+  35%  { background-color: #8eb1ff; }
+  100% { background-color: var(--bs-primary, #4680ff); }
+}
+
+/* ── Toast notifications ──────────────────────────── */
+#toast-container {
+  position: fixed;
+  top: 90px;
+  right: 24px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+  max-width: 360px;
+}
+
+.app-toast {
+  pointer-events: auto;
+  background: #fff;
+  border-left: 4px solid var(--bs-primary, #4680ff);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  padding: 12px 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 280px;
+  animation: toast-in 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  font-size: 0.86rem;
+}
+
+.app-toast.toast-danger  { border-left-color: #dc3545; }
+.app-toast.toast-warning { border-left-color: #f59f00; }
+.app-toast.toast-success { border-left-color: #2bb673; }
+
+.app-toast .toast-icon  { font-size: 1.25rem; line-height: 1; margin-top: 1px; }
+.app-toast.toast-danger  .toast-icon { color: #dc3545; }
+.app-toast.toast-warning .toast-icon { color: #f59f00; }
+.app-toast.toast-success .toast-icon { color: #2bb673; }
+.app-toast.toast-info    .toast-icon { color: var(--bs-primary, #4680ff); }
+
+.app-toast .toast-body { flex: 1; }
+.app-toast .toast-title { font-weight: 700; margin-bottom: 2px; }
+.app-toast .toast-message { color: #495057; line-height: 1.4; }
+.app-toast .toast-close {
+  border: none;
+  background: transparent;
+  color: #adb5bd;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.app-toast .toast-close:hover { color: #495057; background: #f1f3f5; }
+
+.app-toast.leaving { animation: toast-out 0.25s ease forwards; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes toast-out {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(20px); }
 }
 
 .graph-no-data-overlay {
@@ -270,33 +397,54 @@
   opacity: 0;
 }
 
-/* Legend chips */
+/* Bottom bar — legend on the left, capture cluster on the right.
+   Legend takes the remaining width and wraps its chips internally; the
+   cluster always stays pinned to the right and never gets pushed below. */
+.graph-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: nowrap;
+  gap: 0.75rem;
+}
+
+/* Legend chips — flex-1 so chips wrap WITHIN the legend column without
+   shoving the capture cluster onto its own row. */
 .graph-legend {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0.5rem;
-  min-height: 26px;
+  min-height: 31px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The cluster never shrinks or wraps onto its own row. */
+.graph-capture-cluster {
+  flex: 0 0 auto;
 }
 
 .graph-legend-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
+  min-height: 31px;
+  padding: 0 12px;
   border-radius: 6px;
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   font-weight: 600;
   letter-spacing: 0.02em;
   background: #f0f2f5;
   color: #495057;
-  transition: background 0.15s, transform 0.1s;
-  cursor: default;
+  transition: background 0.15s;
+  cursor: pointer;
   user-select: none;
+  line-height: 1;
 }
 
 .graph-legend-chip:hover {
   background: #e3e8ef;
-  transform: translateY(-1px);
 }
 
 .graph-legend-chip.disabled {
@@ -305,8 +453,8 @@
 }
 
 .graph-legend-swatch {
-  width: 10px;
-  height: 10px;
+  width: 11px;
+  height: 11px;
   border-radius: 3px;
   flex-shrink: 0;
 }

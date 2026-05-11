@@ -53,7 +53,7 @@ jobs:
         with:
           projectPath: control-app
           tagName: ${{ github.ref_name }}
-          releaseName: 'Zephyros ${{ github.ref_name }}'
+          releaseName: 'MECH2A2 Wind Tunnel Controller ${{ github.ref_name }}'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

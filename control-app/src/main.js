@@ -3,6 +3,49 @@ const { listen } = window.__TAURI__.event;
 
 let ws = null;
 let pendingFanMode = null;
+// True while the user is intentionally tearing down the socket (clicking the
+// disconnect button). Distinguishes a clean close from an unexpected drop so
+// we only notify on the latter.
+let intentionalClose = false;
+// Latest telemetry snapshot used by "Collect Data" to capture a scatter
+// point without round-tripping to the Pico.
+let latestTelemetry = null;
+
+// ── Toast notifications ─────────────────────────────────────────
+// Lightweight in-app toast. Levels: 'info' (default) | 'success' | 'warning' | 'danger'.
+function showToast(message, { title = '', level = 'info', duration = 5000 } = {}) {
+  const container = document.getElementById('toast-container');
+  if (!container) {
+    console[level === 'danger' ? 'error' : 'log'](title ? `[${title}] ${message}` : message);
+    return;
+  }
+  const ICONS = {
+    info:    'ti ti-info-circle',
+    success: 'ti ti-circle-check',
+    warning: 'ti ti-alert-triangle',
+    danger:  'ti ti-plug-connected-x',
+  };
+  const toast = document.createElement('div');
+  toast.className = `app-toast toast-${level}`;
+  toast.innerHTML = `
+    <i class="${ICONS[level] || ICONS.info} toast-icon"></i>
+    <div class="toast-body">
+      ${title ? `<div class="toast-title">${title}</div>` : ''}
+      <div class="toast-message"></div>
+    </div>
+    <button type="button" class="toast-close" aria-label="Dismiss">×</button>
+  `;
+  toast.querySelector('.toast-message').textContent = message;
+
+  const remove = () => {
+    if (!toast.isConnected) return;
+    toast.classList.add('leaving');
+    toast.addEventListener('animationend', () => toast.remove(), { once: true });
+  };
+  toast.querySelector('.toast-close').addEventListener('click', remove);
+  container.appendChild(toast);
+  if (duration > 0) setTimeout(remove, duration);
+}
 
 function addToLog(message, type) {
   const log = document.getElementById('websocket-log');
@@ -151,7 +194,23 @@ function updateConnectButton(connected) {
   }
 }
 
+function setPidBadge(mode, active) {
+  const stateEl = document.getElementById('pid-state-display');
+  if (!stateEl) return;
+  if (mode !== 'pid') {
+    stateEl.innerText = 'Inactive';
+    stateEl.className = 'badge bg-secondary text-white';
+  } else if (active) {
+    stateEl.innerText = 'Active';
+    stateEl.className = 'badge bg-success';
+  } else {
+    stateEl.innerText = 'Wind-up';
+    stateEl.className = 'badge bg-warning text-dark';
+  }
+}
+
 async function connectWs(url) {
+  intentionalClose = false;
   ws = new WebSocket(url);
 
   ws.onopen = () => {
@@ -162,13 +221,25 @@ async function connectWs(url) {
     addToLog('Connection established', 'received');
   };
 
-  ws.onclose = () => {
-    console.log('WebSocket connection closed');
+  ws.onclose = (event) => {
+    const wasIntentional = intentionalClose;
+    console.log('WebSocket connection closed', { code: event?.code, reason: event?.reason, wasIntentional });
     statusDot.classList.remove("bg-success");
     statusDot.classList.add("bg-danger");
     document.getElementById("status").textContent = "Disconnected";
     updateConnectButton(false);
     ws = null;
+    pendingFanMode = null;
+    latestTelemetry = null;
+    if (!wasIntentional) {
+      const codeStr = event?.code ? ` (code ${event.code})` : '';
+      const reason = event?.reason ? `: ${event.reason}` : '';
+      showToast(
+        `Lost connection to the wind tunnel${codeStr}${reason}. Click "Open WebSocket Connection" to retry.`,
+        { title: 'WebSocket disconnected', level: 'danger', duration: 8000 },
+      );
+    }
+    intentionalClose = false;
   };
 
   ws.onmessage = event => {
@@ -188,28 +259,27 @@ async function connectWs(url) {
       const densityEl = document.getElementById('air-density');
       if (densityEl) densityEl.innerText = fmtTel(data.air_density, 'kg/m³', 4);
 
-      // PID status indicator
-      const pidStatusEl = document.getElementById('pid-status-row');
-      if (pidStatusEl) {
-        if (data.fan_mode === 'pid') {
-          pidStatusEl.classList.remove('d-none');
-          const setpointEl = document.getElementById('pid-setpoint-display');
-          const outputEl = document.getElementById('pid-output-display');
-          const stateEl = document.getElementById('pid-state-display');
-          if (setpointEl) setpointEl.innerText = `${data.pid_setpoint != null ? Number(data.pid_setpoint).toFixed(2) : '-'} m/s`;
-          if (outputEl) outputEl.innerText = `${data.pid_output != null ? Number(data.pid_output).toFixed(1) : '-'} %`;
-          if (stateEl) {
-            if (data.pid_active) {
-              stateEl.innerText = 'Active';
-              stateEl.className = 'badge bg-success';
-            } else {
-              stateEl.innerText = 'Wind-up';
-              stateEl.className = 'badge bg-warning text-dark';
-            }
-          }
-        } else {
-          pidStatusEl.classList.add('d-none');
-        }
+      // Cache the freshest airspeed/power so "Collect Data" can grab them
+      // without asking the Pico for an extra round-trip.
+      latestTelemetry = {
+        airspeed: data.air_speed,
+        power: data.power,
+        receivedAt: performance.now(),
+      };
+
+      // PID status row (always visible — badge reflects state)
+      if (data.fan_mode === 'pid') {
+        const setpointEl = document.getElementById('pid-setpoint-display');
+        const outputEl = document.getElementById('pid-output-display');
+        if (setpointEl) setpointEl.innerText = `${data.pid_setpoint != null ? Number(data.pid_setpoint).toFixed(2) : '-'} m/s`;
+        if (outputEl) outputEl.innerText = `${data.pid_output != null ? Number(data.pid_output).toFixed(1) : '-'} %`;
+        setPidBadge('pid', !!data.pid_active);
+      } else {
+        const setpointEl = document.getElementById('pid-setpoint-display');
+        const outputEl = document.getElementById('pid-output-display');
+        if (setpointEl) setpointEl.innerText = '-';
+        if (outputEl) outputEl.innerText = '-';
+        setPidBadge('percent', false);
       }
 
       if (data.fan_mode) {
@@ -221,15 +291,6 @@ async function connectWs(url) {
 
       if (data.dimmer_curve_mode) {
         setDimmerCurveButton(data.dimmer_curve_mode);
-      }
-    }
-
-    // Scatter plot data from Pico: { type: "plot_data", airspeed: number, power: number }
-    if (data.type === "plot_data") {
-      if (window.liveGraph && window.liveGraph.isRecording && data.airspeed != null && data.power != null) {
-        const pitchSelect = document.getElementById('pitch-angle-select');
-        const pitch = pitchSelect ? Number(pitchSelect.value) : 0;
-        window.liveGraph.addScatterPoint(data.airspeed, data.power, pitch);
       }
     }
 
@@ -245,13 +306,9 @@ async function connectWs(url) {
 
   };
   ws.onerror = error => {
-    console.error(error);
-    document.getElementById("status").textContent = "Disconnected";
-    statusDot.classList.remove("bg-success");
-    statusDot.classList.add("bg-danger");
-    updateConnectButton(false);
-    ws = null;
-    pendingFanMode = null;
+    // `onerror` fires immediately before `onclose`; let `onclose` own the UI
+    // update and toast so we don't fire two notifications for one drop.
+    console.error('WebSocket error', error);
   };
   const originalSend = ws.send;
   ws.send = function (data) {
@@ -341,13 +398,9 @@ window.addEventListener("DOMContentLoaded", () => {
   })
   connectBtn?.addEventListener("click", async () => {
     if (ws) {
+      // Flag that this close is user-initiated so onclose doesn't toast.
+      intentionalClose = true;
       ws.close();
-      console.log('WebSocket connection closed');
-      statusDot.classList.remove("bg-success");
-      statusDot.classList.add("bg-danger");
-      document.getElementById("status").textContent = "Disconnected";
-      updateConnectButton(false);
-      ws = null;
       return;
     } else {
       const wsUrl = `ws://${ipInput.value}/ws`;
@@ -570,7 +623,6 @@ class LiveGraph {
 
     // Data state — flat array of { x, y, pitch }
     this.points = [];
-    this.isRecording = false;
     this.xLabel = 'Airspeed (m/s)';
     this.yLabel = 'Power (mW)';
 
@@ -689,12 +741,10 @@ class LiveGraph {
 
   // ── Data methods ────────────────────────────────────────────────
 
-  /** Called when a scatter data point arrives while recording.
-   *  data = { target_airspeed: number, measured_power: number }
-   *  pitchAngle comes from the UI selector. */
+  /** Add one scatter point. */
   addScatterPoint(airspeed, power, pitchAngle) {
-    if (!this.isRecording) return;
     this.points.push({ x: Number(airspeed), y: Number(power), pitch: Number(pitchAngle) });
+    document.getElementById('graph-no-data')?.classList.add('hidden');
     this._updateLegend();
     this._scheduleFrame();
   }
@@ -728,27 +778,41 @@ class LiveGraph {
     }
   }
 
-  // ── Start / Stop ───────────────────────────────────────────────
-  start() {
-    this.isRecording = true;
-    document.getElementById('graph-no-data')?.classList.add('hidden');
-    this._scheduleFrame();
-  }
-
-  stop() {
-    this.isRecording = false;
-    if (this._rafId) {
-      cancelAnimationFrame(this._rafId);
-      this._rafId = null;
-    }
-  }
-
   clear() {
     this.points = [];
     this.hiddenPitches.clear();
     this._updateLegend();
     document.getElementById('graph-no-data')?.classList.remove('hidden');
     this._drawEmpty();
+  }
+
+  // ── CSV Import ──────────────────────────────────────────────────
+  // Parses a CSV string previously produced by exportCSV() (or any file with
+  // 3 columns: airspeed, power, pitch). Returns { added, skipped }.
+  importCSV(csvText) {
+    let added = 0;
+    let skipped = 0;
+    const lines = csvText.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const cols = line.split(',').map(s => s.trim());
+      // Skip a header row if its first column isn't a number.
+      if (i === 0 && cols[0] && isNaN(Number(cols[0]))) continue;
+      if (cols.length < 3) { skipped++; continue; }
+      const x = Number(cols[0]);
+      const y = Number(cols[1]);
+      const pitch = Number(cols[2]);
+      if (!isFinite(x) || !isFinite(y) || !isFinite(pitch)) { skipped++; continue; }
+      this.points.push({ x, y, pitch });
+      added++;
+    }
+    if (added > 0) {
+      document.getElementById('graph-no-data')?.classList.add('hidden');
+      this._updateLegend();
+      this._scheduleFrame();
+    }
+    return { added, skipped };
   }
 
   // ── CSV Export ──────────────────────────────────────────────────
@@ -811,10 +875,7 @@ class LiveGraph {
     }
 
     if (!isFinite(xMin)) {
-      // No visible data
-      if (this.isRecording) {
-        this._rafId = requestAnimationFrame(() => { this._rafId = null; this._draw(); });
-      }
+      // No visible data — nothing to draw, no need to keep redrawing.
       return;
     }
 
@@ -960,13 +1021,6 @@ class LiveGraph {
       this.tooltip.classList.remove('visible');
     }
 
-    // Keep drawing while recording
-    if (this.isRecording) {
-      this._rafId = requestAnimationFrame(() => {
-        this._rafId = null;
-        this._draw();
-      });
-    }
   }
 
   // ── Utilities ──────────────────────────────────────────────────
@@ -998,41 +1052,98 @@ function initLiveGraph() {
   const graph = new LiveGraph('graph-canvas');
   window.liveGraph = graph;
 
-  const toggleBtn = document.getElementById('graph-toggle-btn');
-  const toggleText = document.getElementById('graph-toggle-text');
-  const clearBtn = document.getElementById('graph-clear-btn');
-  const exportBtn = document.getElementById('graph-export-btn');
-  const sendDataBtn = document.getElementById('graph-send-data-btn');
-  const pitchSelect = document.getElementById('pitch-angle-select');
+  const clearBtn      = document.getElementById('graph-clear-btn');
+  const exportBtn     = document.getElementById('graph-export-btn');
+  const importBtn     = document.getElementById('graph-import-btn');
+  const pointBtn      = document.getElementById('graph-point-btn');
+  const autoBtn       = document.getElementById('graph-auto-btn');
+  const autoText      = document.getElementById('graph-auto-text');
+  const autoInterval  = document.getElementById('graph-auto-interval');
+  const pitchSelect   = document.getElementById('pitch-angle-select');
 
-  toggleBtn?.addEventListener('click', () => {
-    const active = toggleBtn.getAttribute('data-graphing') === 'true';
-    if (!active) {
-      graph.start();
-      toggleBtn.setAttribute('data-graphing', 'true');
-      toggleBtn.classList.remove('btn-success');
-      toggleBtn.classList.add('btn-danger');
-      toggleText.textContent = 'Stop Graphing';
-      toggleBtn.querySelector('i').className = 'ti ti-player-stop me-1';
-      sendDataBtn?.classList.add('visible');
-
-      if (ws) ws.send(JSON.stringify({ action: 'start_graphing' }));
-    } else {
-      graph.stop();
-      toggleBtn.setAttribute('data-graphing', 'false');
-      toggleBtn.classList.remove('btn-danger');
-      toggleBtn.classList.add('btn-success');
-      toggleText.textContent = 'Start Graphing';
-      toggleBtn.querySelector('i').className = 'ti ti-player-play me-1';
-      sendDataBtn?.classList.remove('visible');
-
-      if (ws) ws.send(JSON.stringify({ action: 'stop_graphing' }));
+  // Capture one point from the latest telemetry frame. Returns true on
+  // success, false (with a toast) when telemetry is missing or stale.
+  // No Pico round-trip — telemetry is already streaming at ~10 Hz.
+  const TELEMETRY_STALE_MS = 1500;
+  function capturePoint({ silent = false } = {}) {
+    if (!latestTelemetry || latestTelemetry.airspeed == null || latestTelemetry.power == null) {
+      if (!silent) {
+        showToast(
+          ws ? 'Waiting for the first telemetry frame from the wind tunnel…'
+             : 'Connect to the wind tunnel first.',
+          { title: 'No data yet', level: 'warning', duration: 3500 },
+        );
+      }
+      return false;
     }
+    const age = performance.now() - latestTelemetry.receivedAt;
+    if (age > TELEMETRY_STALE_MS) {
+      if (!silent) {
+        showToast(
+          `Latest telemetry is ${(age / 1000).toFixed(1)}s old — connection may have stalled.`,
+          { title: 'Stale data', level: 'warning', duration: 4000 },
+        );
+      }
+      return false;
+    }
+    const pitch = pitchSelect ? Number(pitchSelect.value) : 0;
+    graph.addScatterPoint(latestTelemetry.airspeed, latestTelemetry.power, pitch);
+    // Subtle click feedback — a brief shift to a whiter blue. Removing and
+    // re-adding the class forces the CSS animation to restart on repeat clicks.
+    pointBtn.classList.remove('collected');
+    void pointBtn.offsetWidth;
+    pointBtn.classList.add('collected');
+    return true;
+  }
+
+  pointBtn?.addEventListener('click', () => capturePoint());
+
+  // ── Auto-capture timer ────────────────────────────────────────
+  let autoTimer = null;
+
+  function stopAuto() {
+    if (autoTimer != null) {
+      clearInterval(autoTimer);
+      autoTimer = null;
+    }
+    autoBtn.setAttribute('data-auto', 'false');
+    autoBtn.classList.remove('btn-danger');
+    autoBtn.classList.add('btn-success');
+    autoBtn.querySelector('i').className = 'ti ti-player-play me-1';
+    autoText.textContent = 'Start Auto';
+    autoInterval.disabled = false;
+  }
+
+  function startAuto() {
+    const intervalSec = Number(autoInterval.value);
+    if (!isFinite(intervalSec) || intervalSec < 0.1) {
+      showToast('Auto interval must be at least 0.1 seconds.',
+        { title: 'Invalid interval', level: 'warning', duration: 3500 });
+      return;
+    }
+    // Fire one immediately so the user gets a point right away, then on a timer.
+    capturePoint({ silent: true });
+    autoTimer = setInterval(() => capturePoint({ silent: true }), intervalSec * 1000);
+    autoBtn.setAttribute('data-auto', 'true');
+    autoBtn.classList.remove('btn-success');
+    autoBtn.classList.add('btn-danger');
+    autoBtn.querySelector('i').className = 'ti ti-player-stop me-1';
+    autoText.textContent = `Stop Auto (${intervalSec}s)`;
+    autoInterval.disabled = true;
+  }
+
+  autoBtn?.addEventListener('click', () => {
+    const running = autoBtn.getAttribute('data-auto') === 'true';
+    if (running) stopAuto(); else startAuto();
   });
 
-  sendDataBtn?.addEventListener('click', () => {
-    if (!ws) return;
-    ws.send(JSON.stringify({ action: 'send_data' }));
+  // Live-update the "Stop Auto (Ns)" label if the user edits the interval
+  // while paused; restart the timer if they edit it while running.
+  autoInterval?.addEventListener('change', () => {
+    if (autoBtn.getAttribute('data-auto') === 'true') {
+      stopAuto();
+      startAuto();
+    }
   });
 
   clearBtn?.addEventListener('click', () => {
@@ -1041,6 +1152,30 @@ function initLiveGraph() {
 
   exportBtn?.addEventListener('click', () => {
     graph.exportCSV();
+  });
+
+  importBtn?.addEventListener('click', async () => {
+    try {
+      const loaded = await invoke('load_csv');
+      if (!loaded) return; // user cancelled
+      const result = graph.importCSV(loaded.content);
+      if (result.added === 0) {
+        showToast(
+          'No valid rows found. Expected columns: Airspeed (m/s), Power (mW), Pitch Angle (°).',
+          { title: 'Nothing imported', level: 'warning', duration: 5000 },
+        );
+        return;
+      }
+      const skippedMsg = result.skipped > 0 ? ` (${result.skipped} rows skipped)` : '';
+      showToast(
+        `Imported ${result.added} point${result.added === 1 ? '' : 's'}${skippedMsg}.`,
+        { title: 'CSV loaded', level: 'success', duration: 3500 },
+      );
+    } catch (err) {
+      console.error('Load CSV failed:', err);
+      showToast(typeof err === 'string' ? err : (err?.message ?? 'Unknown error'),
+        { title: 'Load CSV failed', level: 'danger', duration: 6000 });
+    }
   });
 }
 

@@ -10,7 +10,6 @@ import analogio
 import math
 import busio
 import struct
-import errno  # Added for precise I2C error parsing
 
 # ── I2C / DimmerLink ──────────────────────────────────────────────────────────
 _DIMMER_SDA_PIN = board.GP20
@@ -90,7 +89,7 @@ _PID_DT               = 0.05  # Controller sample period (20 Hz)
 # Runtime PID variables (reset on mode switch)
 _pid_target_airspeed  = 0.0   # Setpoint r (m/s)
 _pid_integral         = 0.0   # Integrator state
-_pid_prev_y_filt      = 0.0   # Previous filtered measurement (for derivative)
+_pid_prev_y           = 0.0   # Previous measurement y (for derivative); LPF acts on d, not y
 _pid_windup_start     = 0.0   # monotonic time when PID mode was entered
 _pid_active           = False # True once wind-up is complete and loop is running
 _pid_output           = 0.0   # Last computed controller output (for telemetry)
@@ -106,14 +105,14 @@ def set_target_fan_speed(percent: float) -> None:
 def set_pid_setpoint(airspeed_ms: float) -> None:
     """Set the PID target airspeed (m/s). Only effective when fan_control_mode == 'pid'."""
     global _pid_target_airspeed, _pid_active, _pid_windup_start
-    global _pid_integral, _pid_prev_y_filt, _pid_prev_d_filt, _pid_output
+    global _pid_integral, _pid_prev_y, _pid_prev_d_filt, _pid_output
     new_setpoint = max(0.0, float(airspeed_ms))
     # Coming out of a zero setpoint while in PID mode → re-arm wind-up so the
     # loop ramps in smoothly instead of starting cold against the output clamp.
     if fan_control_mode == "pid" and _pid_target_airspeed <= 0 and new_setpoint > 0:
         _pid_active       = False
         _pid_integral     = 0.0
-        _pid_prev_y_filt  = 0.0
+        _pid_prev_y  = 0.0
         _pid_prev_d_filt  = 0.0
         _pid_output       = 0.0
         _pid_windup_start = time.monotonic()
@@ -225,10 +224,10 @@ async def dimmer_updater() -> None:
 
 def _pid_reset() -> None:
     """Zero all PID integrator / filter state for a clean start."""
-    global _pid_integral, _pid_prev_y_filt, _pid_active, _pid_output, _pid_prev_d_filt
+    global _pid_integral, _pid_prev_y, _pid_active, _pid_output, _pid_prev_d_filt
     global _pid_windup_start, _pid_target_airspeed
     _pid_integral       = 0.0
-    _pid_prev_y_filt    = 0.0
+    _pid_prev_y    = 0.0
     _pid_active         = False
     _pid_output         = 0.0
     _pid_windup_start   = time.monotonic()
@@ -262,7 +261,7 @@ async def pid_controller() -> None:
       integral += (Ki*e + Kt*es) * dt   (anti-windup back-calculation)
       d_filt: -y through 1st-order LPF, then finite-difference derivative
     """
-    global _pid_integral, _pid_prev_y_filt, _pid_active, _pid_output, _pid_prev_d_filt
+    global _pid_integral, _pid_prev_y, _pid_active, _pid_output, _pid_prev_d_filt
     
     await asyncio.sleep(1.0)  # Let other tasks settle
     last_time = time.monotonic()
@@ -278,18 +277,22 @@ async def pid_controller() -> None:
         # ── Wind-up phase: hold at 75% for 5 s before engaging the loop ──
         elapsed = time.monotonic() - _pid_windup_start
         if not _pid_active:
+            # Track measurement through wind-up so the derivative has a fresh
+            # _pid_prev_y at the moment the loop activates (avoids a giant
+            # spurious derivative kick on the first active iteration).
+            _pid_prev_y = smoothed_airspeed_ms
             if elapsed < _PID_WINDUP_DURATION:
-                # Hold at _PID_WINDUP_LEVEL for the full duration
                 set_target_fan_speed(_PID_WINDUP_LEVEL)
                 _pid_output = _PID_WINDUP_LEVEL
                 continue
-            else:
-                # Wind-up complete — seed the integrator so the loop starts
-                # smoothly from the current operating point.
-                _pid_active = True
-                _pid_integral = _PID_WINDUP_LEVEL  # pre-load integrator
-                _pid_prev_y_filt = smoothed_airspeed_ms
-                print(f"PID: wind-up complete, loop active (seeded at {_PID_WINDUP_LEVEL}%)")
+            # Wind-up complete — pre-load integrator at the operating point
+            # and reset derivative filter state, then defer the first PID
+            # compute to the next cycle so dt is a clean _PID_DT tick.
+            _pid_active      = True
+            _pid_integral    = _PID_WINDUP_LEVEL
+            _pid_prev_d_filt = 0.0
+            print(f"PID: wind-up complete, loop active (seeded at {_PID_WINDUP_LEVEL}%)")
+            continue
 
         # ── Measurement ───────────────────────────────────────────────
         r  = _pid_target_airspeed      # setpoint (m/s)
@@ -310,14 +313,14 @@ async def pid_controller() -> None:
 
         # ── Derivative on measurement (-y) with low-pass filter ──────
         # Calculate raw derivative of -y
-        raw_d = -(y - _pid_prev_y_filt) / dt
+        raw_d = -(y - _pid_prev_y) / dt
         
         # Apply low-pass filter to the derivative
         alpha = dt / (Tf + dt) if Tf > 0 else 1.0
         d_filt = alpha * raw_d + (1.0 - alpha) * _pid_prev_d_filt
         
         # Save states for next loop
-        _pid_prev_y_filt = y
+        _pid_prev_y = y
         _pid_prev_d_filt = d_filt
         
         # ── PID terms ─────────────────────────────────────────────────
@@ -486,11 +489,14 @@ async def adc_sampler():
 # ── Air data ──────────────────────────────────────────────────────────────────
 shunt_value = 4700 # Ohms
 R_SPECIFIC = 287.05
-smoothed_airspeed_ms = 0
-_AIRSPEED_ALPHA      = 0.30   # EMA smoothing for airspeed (lower = smoother)
-current_temperate = 15
+smoothed_airspeed_ms = 0.0
+# Light EMA only — the SDP810 is already in averaged mode and the PID's
+# derivative path has its own LPF (Tf). Heavier smoothing here stacks with
+# Tf and adds lag to the P/I terms.
+_AIRSPEED_ALPHA      = 0.6
+current_temperature = 15
 current_pressure = 101325
-air_density = current_pressure / (R_SPECIFIC * (current_temperate + 273.15))
+air_density = current_pressure / (R_SPECIFIC * (current_temperature + 273.15))
 
 Kp = 15.0   # Proportional gain
 Ki = 4.0    # Integral gain
@@ -498,7 +504,7 @@ Kd = 0.5    # Derivative gain
 Kt = 1.2    # Anti-windup tracking gain
 Tf = 0.1    # Derivative filter time constant (seconds)
 
-SSID = "Zephyros"
+SSID = "Team MECH2A2"
 PASSWORD = "password"
 PORT = 80
 
@@ -534,6 +540,13 @@ async def blink(count, on_time=0.1, off_time=0.1):
 @server.route("/ws", GET)
 def ws_handler(request: Request):
     global current_websocket
+    # Close any previous socket so a reconnect doesn't leak the old one.
+    prev = current_websocket
+    if prev is not None:
+        try:
+            prev.close()
+        except Exception as e:
+            print(f"WebSocket: error closing previous socket: {e}")
     websocket = Websocket(request)
     current_websocket = websocket
     # Start at 0% — wait for explicit set_fan_speed from client
@@ -672,7 +685,7 @@ async def sensor_broadcaster():
                 "fan_speed":         await get_dimmer_percent(),
                 "uptime":            time.monotonic(),
                 "fan_mode":          fan_control_mode,
-                "temperature":       round(current_temperate, 2),
+                "temperature":       round(current_temperature, 2),
                 "air_density":       round(air_density, 4),
                 "dimmer_curve_mode": await _dimmer_read_curve_cached(),
             }
@@ -707,13 +720,13 @@ async def send_plotting_data():
         await send_websocket_message(data)
 
 async def measure_airspeed():
-    global smoothed_airspeed_ms, air_density, current_temperate
+    global smoothed_airspeed_ms, air_density, current_temperature
 
     while True:
         if _sdp810_available:
             try:
                 pressure_pa, temperature_c = await sdp810_read()
-                current_temperate = temperature_c
+                current_temperature = temperature_c
                 air_density = current_pressure / (R_SPECIFIC * (temperature_c + 273.15))
                 if pressure_pa <= 0:
                     raw_airspeed = -1 * math.sqrt((2.0 * abs(pressure_pa)) / air_density)

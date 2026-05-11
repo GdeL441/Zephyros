@@ -3,21 +3,6 @@
 version = 4
 
 [[package]]
-name = "Zephyros_Control_App"
-version = "0.0.1"
-dependencies = [
- "objc2-core-location",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "wifi-rs",
- "wifi_scan",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2282,6 +2267,21 @@ name = "matches"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2532096657941c2fea9c289d370a250971c689d4f143798ff67113ec042024a5"
+
+[[package]]
+name = "mech2a2_wind_tunnel_controller"
+version = "1.1.0"
+dependencies = [
+ "objc2-core-location",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "wifi-rs",
+ "wifi_scan",
+]
 
 [[package]]
 name = "memchr"
