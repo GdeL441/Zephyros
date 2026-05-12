@@ -19,6 +19,8 @@ jobs:
             args: '--target x86_64-apple-darwin'
           - platform: windows-latest      # Windows 10/11 x64
             args: ''
+          - platform: ubuntu-latest       # Linux x64
+            args: ''
 
     runs-on: ${{ matrix.platform }}
     defaults:

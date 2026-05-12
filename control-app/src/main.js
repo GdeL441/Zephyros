@@ -264,6 +264,8 @@ async function connectWs(url) {
       latestTelemetry = {
         airspeed: data.air_speed,
         power: data.power,
+        temperature: data.temperature,
+        airDensity: data.air_density,
         receivedAt: performance.now(),
       };
 
@@ -742,8 +744,14 @@ class LiveGraph {
   // ── Data methods ────────────────────────────────────────────────
 
   /** Add one scatter point. */
-  addScatterPoint(airspeed, power, pitchAngle) {
-    this.points.push({ x: Number(airspeed), y: Number(power), pitch: Number(pitchAngle) });
+  addScatterPoint(airspeed, power, pitchAngle, temperature, airDensity) {
+    this.points.push({
+      x: Number(airspeed),
+      y: Number(power),
+      pitch: Number(pitchAngle),
+      temperature: temperature != null ? Number(temperature) : null,
+      airDensity: airDensity != null ? Number(airDensity) : null,
+    });
     document.getElementById('graph-no-data')?.classList.add('hidden');
     this._updateLegend();
     this._scheduleFrame();
@@ -804,7 +812,14 @@ class LiveGraph {
       const y = Number(cols[1]);
       const pitch = Number(cols[2]);
       if (!isFinite(x) || !isFinite(y) || !isFinite(pitch)) { skipped++; continue; }
-      this.points.push({ x, y, pitch });
+      const parseOptional = (s) => {
+        if (s === undefined || s === '') return null;
+        const n = Number(s);
+        return isFinite(n) ? n : null;
+      };
+      const temperature = parseOptional(cols[3]);
+      const airDensity = parseOptional(cols[4]);
+      this.points.push({ x, y, pitch, temperature, airDensity });
       added++;
     }
     if (added > 0) {
@@ -819,8 +834,9 @@ class LiveGraph {
   async exportCSV() {
     if (this.points.length === 0) return;
 
-    const header = ['Airspeed (m/s)', 'Power (mW)', 'Pitch Angle (°)'];
-    const rows = this.points.map(p => `${p.x},${p.y},${p.pitch}`);
+    const header = ['Airspeed (m/s)', 'Power (mW)', 'Pitch Angle (°)', 'Temperature (°C)', 'Air Density (kg/m³)'];
+    const fmt = (v) => (v == null || !isFinite(v) ? '' : v);
+    const rows = this.points.map(p => `${p.x},${p.y},${p.pitch},${fmt(p.temperature)},${fmt(p.airDensity)}`);
     const csv = [header.join(','), ...rows].join('\n');
 
     const now = new Date();
@@ -1087,7 +1103,13 @@ function initLiveGraph() {
       return false;
     }
     const pitch = pitchSelect ? Number(pitchSelect.value) : 0;
-    graph.addScatterPoint(latestTelemetry.airspeed, latestTelemetry.power, pitch);
+    graph.addScatterPoint(
+      latestTelemetry.airspeed,
+      latestTelemetry.power,
+      pitch,
+      latestTelemetry.temperature,
+      latestTelemetry.airDensity,
+    );
     // Subtle click feedback — a brief shift to a whiter blue. Removing and
     // re-adding the class forces the CSS animation to restart on repeat clicks.
     pointBtn.classList.remove('collected');
