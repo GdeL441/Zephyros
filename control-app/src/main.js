@@ -178,6 +178,39 @@ fanSpeedValueEl.addEventListener('blur', () => {
   }
 });
 
+// Global left/right arrow keys nudge the fan speed by one slider step
+// (1% in percent mode, 0.1 m/s in PID mode). Skipped while the user is
+// typing in an input, textarea, or the contenteditable speed value.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+  const target = e.target;
+  const tag = target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (target?.isContentEditable) return;
+
+  const step = Number(fanSpeedSlider.step) || 1;
+  const min = Number(fanSpeedSlider.min);
+  const max = Number(fanSpeedSlider.max);
+  const current = Number(fanSpeedSlider.value);
+  const delta = e.key === 'ArrowRight' ? step : -step;
+  let next = current + delta;
+  // Avoid binary-float drift like 5.1 + 0.1 = 5.199999…
+  next = Math.round(next / step) * step;
+  next = Math.max(min, Math.min(max, next));
+  if (next === current) return;
+
+  e.preventDefault();
+  fanSpeedSlider.value = next;
+  const decimals = currentSliderMode === 'pid' ? 1 : 0;
+  fanSpeedValueEl.textContent = next.toFixed(decimals);
+  updateSliderBackground();
+  if (ws) {
+    ws.send(JSON.stringify({ action: 'set_fan_speed', speed: Number(fanSpeedSlider.value) }));
+  }
+});
+
 
 function updateConnectButton(connected) {
   const connectBtn = document.getElementById("connect-btn");
@@ -385,7 +418,6 @@ window.addEventListener("DOMContentLoaded", () => {
   const getSettingsBtn = document.querySelector("#get-settings-btn")
   const applySettingsBtn = document.querySelector("#apply-settings-btn")
   const resetDPSBtn = document.querySelector("#reset-dps")
-  const testBtn = document.querySelector("#send-test")
   const startFanBtn = document.querySelector("#start-fan")
 
   loading = document.querySelector("#loading")
@@ -509,11 +541,6 @@ window.addEventListener("DOMContentLoaded", () => {
       Tf: Number(document.getElementById("tf-value").value),
       shunt_value: Number(document.getElementById("shunt-value").value),
     }));
-  });
-
-  testBtn?.addEventListener("click", async () => {
-    if (!ws) return
-    ws.send(JSON.stringify({ type: "telemetry", fan_speed: 20, power: 40, uptime: 100 }))
   });
 
   const dimmerCurveBtn = document.querySelector("#dimmer-curve-mode-btn");
