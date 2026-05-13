@@ -25,7 +25,7 @@ Desktop control software for the MECH2A2 wind tunnel rig, built for the P&O 2 co
 
 1. Download the correct installer from the releases (Apple Silicon or Intel)
 2. Drag the app into the Applications folder
-3. Run this in the terminal: `sudo xattr -dr com.apple.quarantine '/Applications/Zephyros Control App.app'`
+3. Run this in the terminal: `sudo xattr -dr com.apple.quarantine '/Applications/MECH2A2 Wind Tunnel Controller.app/'`
 4. Enjoy
 
 ## Building instructions:
