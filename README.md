@@ -1,4 +1,4 @@
-# Zephyros — MECH2A2 Wind Tunnel Controller
+# MECH2A2 Wind Tunnel Controller
 
 Desktop control software for the MECH2A2 wind tunnel rig, built for the P&O 2 course at KU Leuven. The app is a Tauri (Rust + vanilla JS) cross-platform GUI that talks to a Raspberry Pi Pico W (CircuitPython firmware in [`python/code.py`](python/code.py)) over WebSocket. This application allows the user to control the fan and plot power generation.
 
@@ -6,15 +6,15 @@ Desktop control software for the MECH2A2 wind tunnel rig, built for the P&O 2 co
 
 ### Dashboard
 
-![Dashboard — live graph, fan slider, PID status, and turbine telemetry](docs/screenshots/dashboard.png)
+![Dashboard — live graph, fan slider, PID status, and turbine telemetry](.github/screenshots/dashboard.png)
 
 ### Settings
 
-![Settings — PID tuning, load resistance, diagnostic actions, and WebSocket log](docs/screenshots/settings.png)
+![Settings — PID tuning, load resistance, diagnostic actions, and WebSocket log](.github/screenshots/settings.png)
 
 ### WiFi setup
 
-![WiFi setup — scan for nearby Wi-Fi networks and connect to the Pico](docs/screenshots/wifi.png)
+![WiFi setup — scan for nearby Wi-Fi networks and connect to the Pico](.github/screenshots/wifi.png)
 
 ## Repository layout
 
