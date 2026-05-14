@@ -79,7 +79,7 @@ _last_curve_poll_s          = 0.0
 # Matches block diagram: e = r - y through Kp, Ki (with anti-windup Kt),
 # and -y through low-pass filter (1/(1+sTf)) then Kd*s for derivative.
 _DIMMER_MIN_PERCENT   = 40    # Minimum dimmer output (TRIAC can't fire below this)
-_PID_WINDUP_DURATION  = 5.0   # Seconds to ramp from 0 → 75% on PID start
+_PID_WINDUP_DURATION  = 5.0   # Seconds for the windup at 75% on PID start
 _PID_WINDUP_LEVEL     = 75    # Target level during wind-up phase
 _PID_OUTPUT_MIN       = 40    # Clamp: actuator lower bound (%)
 _PID_OUTPUT_MAX       = 100   # Clamp: actuator upper bound (%)
@@ -107,8 +107,7 @@ def set_pid_setpoint(airspeed_ms: float) -> None:
     global _pid_target_airspeed, _pid_active, _pid_windup_start
     global _pid_integral, _pid_prev_y, _pid_prev_d_filt, _pid_output
     new_setpoint = max(0.0, float(airspeed_ms))
-    # Coming out of a zero setpoint while in PID mode → re-arm wind-up so the
-    # loop ramps in smoothly instead of starting cold against the output clamp.
+    # Coming out of a zero setpoint while in PID mode → re-arm wind-up so the fan just goes to 75 for 5 seconds
     if fan_control_mode == "pid" and _pid_target_airspeed <= 0 and new_setpoint > 0:
         _pid_active       = False
         _pid_integral     = 0.0
