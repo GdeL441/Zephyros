@@ -37,3 +37,8 @@ Run `npm run tauri build`
 1. Install dependencies (Rust, Node)
 2. Run `npm install`
 3. Run `npm run tauri dev`
+
+## Knows issues:
+- Buttons (like the one to switch to PID) do not always work, they have to be pressed multiple times.
+- The DimmerLink curve toggle does not work (linear works well enough for this control loop).
+- The Wi-Fi connection feature is currently untested.
